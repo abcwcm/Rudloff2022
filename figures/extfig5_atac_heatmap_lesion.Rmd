@@ -1,0 +1,281 @@
+---
+title: Ext. Fig. 5a
+subtitle: "Chromatin accessibility heatmap showing TCRTAG from 6h to 60d in liver tumors tumors."
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output:
+  html_document:
+    code_folding: hide
+    theme: space
+    toc: yes
+    toc_depth: 3
+    toc_float: no
+  BiocStyle::html_document2:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+  knitrBootstrap::bootstrap_document:
+    highlight.chooser: yes
+    theme.chooser: yes
+  pdf_document:
+    toc: yes
+always_allow_html: yes
+---
+
+```{r setup, bootstrap.show.code = FALSE, results='hide', bootstrap.show.message=FALSE, warning=FALSE, echo=FALSE}
+knitr::opts_chunk$set(bootstrap.show.code = FALSE, message=FALSE, warning=FALSE)
+suppressMessages(library(magrittr))
+suppressMessages(library(kableExtra))
+suppressMessages(library(ggplot2))
+suppressMessages(library(data.table))
+suppressMessages(library(ggrepel))
+suppressMessages(library(DESeq2))
+suppressMessages(library(DiffBind))
+suppressMessages(library(sva))
+suppressMessages(library(openxlsx))
+suppressMessages(library(pheatmap))
+suppressMessages(library(RColorBrewer))
+suppressMessages(library(profileplyr))
+suppressMessages(library(grid))
+suppressMessages(library(ComplexHeatmap))
+suppressMessages(library(TxDb.Mmusculus.UCSC.mm10.knownGene))
+set.seed(123)
+```
+
+
+# Samples
+
+The following samples were part of this analysis:
+
+```{r read_in_metadata, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE, context="data"}
+decoderFile <- "atac_decoder_diffBind_plusPublic.csv"
+decoder.data <- read.table(decoderFile,header=T,stringsAsFactors=F, sep=",")
+decoder.data$Condition = factor(decoder.data$Condition)
+decoder.data$Condition <- relevel(decoder.data$Condition, ref = "naive")
+decoder.data$SampleID = make.names(decoder.data$SampleID)
+kable(decoder.data, row.names=FALSE,  padding = 0, longtable=TRUE) %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+```{r read_in_counts, message=FALSE, warning=FALSE, cache=FALSE, echo=FALSE,  fig.width=10, fig.height=7, context="data"}
+DB <- readRDS("DB.count.plusPublic.Rds")
+DB <- dba.count(DB, peaks=NULL, score=DBA_SCORE_READS)
+consensus_peaks <- dba.peakset(DB, peaks=NULL, bRetrieve=TRUE)
+```
+
+```{r createDDSobject, message=FALSE, warning=FALSE, cache=FALSE, echo=FALSE,  fig.width=10, fig.height=7, context="data"}
+raw_counts = as.data.frame(mcols(consensus_peaks))
+row.names(raw_counts) = paste0(as.data.frame(consensus_peaks)$seqnames, ":",as.data.frame(consensus_peaks)$start,"-",as.data.frame(consensus_peaks)$end)
+
+#table(decoder.data$SampleID == colnames(raw_counts))
+
+dds <- DESeqDataSetFromMatrix(countData = raw_counts,
+                              colData = decoder.data,
+                              design= ~ Condition)
+dds <- estimateSizeFactors(dds)
+
+mod1 <- model.matrix(~Condition, decoder.data)
+mod0 <- model.matrix(~1, decoder.data)
+
+normCounts <-  counts(dds, normalized = TRUE)
+svseq <- svaseq(normCounts, mod1, mod0, n.sv = 3)
+
+decoder.data.sva <- cbind(decoder.data,data.frame(svseq$sv))
+ddssva <- DESeqDataSetFromMatrix(countData = raw_counts,
+                                 colData = decoder.data.sva,
+                                 design= ~ X1 + X2 + X3 + Condition)
+ddssva <- estimateSizeFactors(ddssva)
+
+counts_sva = limma::removeBatchEffect(log2(normCounts+1), covariates = svseq$sv, design=mod1) # 
+
+```
+
+
+# Differential accessibility 
+
+```{r runDESeq2, eval=F,echo=FALSE, message=FALSE, warning=FALSE,   context="data"}
+ddssva <- DESeq(ddssva, parallel=F, fitType="parametric")
+saveRDS(ddssva, "ddssva.RDS")
+```
+
+```{r da_res, eval=T,echo=FALSE, message=FALSE, warning=FALSE,   context="data"}
+varInt="Condition"
+dbs.all <- list()
+alphaTR = 0.05
+lfcTHR = 1
+ddssva <- readRDS("ddssva.RDS")
+
+comps = c("naive_vs_L6hr", "L6hr_vs_L12hr", "L12hr_vs_L5", "L5_vs_L7", "L7_vs_L14", "L14_vs_L21", "L21_vs_L28", "L28_vs_L35", "L35_vs_L60", "naive_vs_E6hr", "E6hr_vs_E12hr", "E12hr_vs_E24hr", "E24hr_vs_E5", "E5_vs_E7", "E7_vs_M")
+for (comp in comps){
+  levelRef <- strsplit(comp, "_vs_")[[1]][1]
+  levelTest <- strsplit(comp, "_vs_")[[1]][2]
+  cat(paste("Comparison", levelTest, "vs", levelRef, "done\n"))
+  dbs.all[[paste0(levelTest,"_vs_",levelRef)]] <- 
+    results(ddssva, contrast=c(varInt, levelTest, levelRef), alpha=alphaTR) %>% as.data.frame()
+}
+
+
+dbs.all.sig <- lapply(names(dbs.all), function(x){
+  subset(dbs.all[[x]], padj < alphaTR & abs(log2FoldChange) > lfcTHR)
+   })
+names(dbs.all.sig) <- names(dbs.all)
+names(dbs.all.sig) = gsub("naive", "N", names(dbs.all.sig))
+ 
+res = data.frame(sapply(dbs.all.sig, NROW))
+colnames(res) <- paste0("padj<",lfcTHR, " & ","abs(log2FoldChange)>",lfcTHR)
+
+kable(res, row.names=T,  padding = 0, longtable=TRUE) %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F)
+```
+
+# Heatmap (DESeq2 normalized)
+
+Contains all sig peaks in any one sequential time point (L6hr_vs_N,L12hr_vs_L6hr,L5_vs_L12hr,L7_vs_L5,L14_vs_L7, L21_vs_L14, L28_vs_L21, L35_vs_L28, L60_vs_L35)
+
+Heatmap is scaled by row.  
+Clusters by kmeans = 6
+
+(Note, there is some randomness to the clustering, so may not get exact result on each run)
+
+```{r prepare_for_heatmap, eval=T,  warning=FALSE,  echo=FALSE,  fig.width=10, fig.height=8}
+lfcTHR = 1
+lesions_list <- list(L6hr_vs_N=subset(dbs.all.sig$L6hr_vs_N, abs(log2FoldChange) > lfcTHR),
+                     L12hr_vs_L6hr=subset(dbs.all.sig$L12hr_vs_L6hr, abs(log2FoldChange) > lfcTHR),
+                     L5_vs_L12hr=subset(dbs.all.sig$L5_vs_L12hr,  abs(log2FoldChange) > lfcTHR),
+                     L7_vs_L5=subset(dbs.all.sig$L7_vs_L5,  abs(log2FoldChange) > lfcTHR),
+                     L14_vs_L7=subset(dbs.all.sig$L14_vs_L7,  abs(log2FoldChange) > lfcTHR),
+                     L21_vs_L14=subset(dbs.all.sig$L21_vs_L14,  abs(log2FoldChange) > lfcTHR),
+                     L28_vs_L21=subset(dbs.all.sig$L28_vs_L21,  abs(log2FoldChange) > lfcTHR),
+                     L35_vs_L28=subset(dbs.all.sig$L35_vs_L28,  abs(log2FoldChange) > lfcTHR),
+                     L60_vs_L35=subset(dbs.all.sig$L60_vs_L35,  abs(log2FoldChange) > lfcTHR))
+
+
+all.sig.rows = lapply(names(lesions_list), function(x){
+  lesions_list[[x]] %>% as.data.frame() %>% row.names()
+}) %>% invisible()
+
+all.sig.rows = unique(unlist(all.sig.rows))
+
+
+naive.decoder = subset(decoder.data, type == "naive")
+e6hr.decoder = subset(decoder.data, type == "lesion" & time == "6hr")
+e12hr.decoder = subset(decoder.data, type == "lesion" & time == "12hr")
+e5.decoder = subset(decoder.data, type == "lesion" & time == "5d")
+e7.decoder = subset(decoder.data, type == "lesion" & time == "7d")
+e14.decoder = subset(decoder.data, type == "lesion" & time == "14d")
+e21.decoder = subset(decoder.data, type == "lesion" & time == "21d")
+e28.decoder = subset(decoder.data, type == "lesion" & time == "28d")
+e35.decoder = subset(decoder.data, type == "lesion" & time == "35d")
+e60.decoder = subset(decoder.data, type == "lesion" & time == "60d")
+
+decod.sub <- rbind(naive.decoder,
+                   e6hr.decoder,
+                   e12hr.decoder,
+                   e5.decoder,
+                   e7.decoder,
+                   e14.decoder,
+                   e21.decoder,
+                   e28.decoder,
+                   e35.decoder,
+                   e60.decoder)
+
+
+annot_col =data.frame(cond = decod.sub$Condition, row.names=make.names(decod.sub$SampleID))
+samps = make.names(decod.sub$SampleID)
+
+log2.count.matrix = counts_sva[all.sig.rows,make.names(decod.sub$SampleID)]
+
+#Obtain the z-score per peak region across all the samples
+count.matrix <- apply(log2.count.matrix, MARGIN = 1, FUN = function(X) (X - mean(X))/sd(X))
+count.matrix <- t(count.matrix)
+```
+
+```{r kmeans_then_save_hm_lesion, eval=F,  warning=FALSE, cache=TRUE,comment=FALSE, echo=FALSE,  fig.width=16, fig.height=10}
+k=6
+km <- kmeans(count.matrix,centers=k, iter.max=500) 
+m.kmeans<- cbind(count.matrix, km$cluster) # combine the cluster with the matrix
+o<- order(m.kmeans[,ncol(m.kmeans)]) # order the last column
+colnames(m.kmeans)[ncol(m.kmeans)] <- "k"
+m.kmeans = m.kmeans[o,]
+annotation_row = data.frame(row.names=row.names(m.kmeans), km=as.factor(m.kmeans[,ncol(m.kmeans)])) 
+ordered_mat = m.kmeans[,1:ncol(m.kmeans)-1]
+
+#table(row.names(annotation_row) == row.names(ordered_mat))
+
+ordered_mat_df = merge(ordered_mat, annotation_row, by="row.names")
+colnames(ordered_mat_df)[1] = "peak"
+
+spl <- strsplit(gsub("-|:", ".", ordered_mat_df$peak), ".", fixed = TRUE)
+ordered_mat_df$chr = sapply(spl, "[", 1)
+ordered_mat_df$start =sapply(spl, "[", 2)
+ordered_mat_df$end = gsub("\\_.*","",sapply(spl, "[", 3))
+ordered_mat_gr = GRanges(ordered_mat_df)
+ordered_mat_gr_anot = ChIPseeker::annotatePeak(ordered_mat_gr,tssRegion = c(-1000,1000),TxDb = TxDb.Mmusculus.UCSC.mm10.knownGene,annoDb = "org.Mm.eg.db", verbose=F)
+ordered_mat_gr_anot_df = as.data.frame(ordered_mat_gr_anot)
+row.names(ordered_mat_gr_anot_df) = ordered_mat_gr_anot_df$peak
+ordered_mat_gr_anot_df = ordered_mat_gr_anot_df[row.names(ordered_mat), ]
+#table(row.names(ordered_mat_gr_anot_df) == row.names(ordered_mat))
+
+write.xlsx(ordered_mat_gr_anot_df, file="hm_lesions_annotatedPeaks.xlsx")
+```
+
+```{r heatmap_deseqNorm, eval=T,  warning=FALSE,  echo=FALSE,  fig.width=10, fig.height=8}
+ordered_mat_in = read.xlsx("hm_lesions_annotatedPeaks.xlsx")
+row.names(ordered_mat_in) <- ordered_mat_in$peak
+ordered_mat = ordered_mat_in[,7:39]
+row.names(ordered_mat) = ordered_mat_in$peak
+annotation_row = data.frame(row.names=ordered_mat_in$peak, km=as.factor(ordered_mat_in$km)) 
+pheatmap::pheatmap(ordered_mat, scale="none", show_rownames=F, fontsize = 10, cellwidth =20,  main = "DAPs across all contrasts",  annotation_col = annot_col,viridis::viridis(50), silent = F , cluster_cols = F, cluster_rows=F, gaps_col = c(nrow(naive.decoder),
+nrow(naive.decoder)+nrow(e6hr.decoder),
+nrow(naive.decoder)+nrow(e6hr.decoder)+nrow(e12hr.decoder),
+nrow(naive.decoder)+nrow(e6hr.decoder)+nrow(e12hr.decoder)+nrow(e5.decoder),
+nrow(naive.decoder)+nrow(e6hr.decoder)+nrow(e12hr.decoder)+nrow(e5.decoder)+nrow(e7.decoder),
+nrow(naive.decoder)+nrow(e6hr.decoder)+nrow(e12hr.decoder)+nrow(e5.decoder)+nrow(e7.decoder)+nrow(e14.decoder),
+nrow(naive.decoder)+nrow(e6hr.decoder)+nrow(e12hr.decoder)+nrow(e5.decoder)+nrow(e7.decoder)+nrow(e14.decoder)+nrow(e21.decoder),
+nrow(naive.decoder)+nrow(e6hr.decoder)+nrow(e12hr.decoder)+nrow(e5.decoder)+nrow(e7.decoder)+nrow(e14.decoder)+nrow(e21.decoder)+nrow(e28.decoder),
+nrow(naive.decoder)+nrow(e6hr.decoder)+nrow(e12hr.decoder)+nrow(e5.decoder)+nrow(e7.decoder)+nrow(e14.decoder)+nrow(e21.decoder)+nrow(e28.decoder)+nrow(e35.decoder)), annotation_row = annotation_row)
+```
+
+# Heatmap (BigWig version)
+
+This is the same heatmap as above, with the same order, but created by querying the signal in the reads per genomic content normalization (RPGC) at 1x normalization.
+Signal from each peak above was extracted +/- 1Kb from peak center in bins of 20.
+Bins with read counts greater than the 75th percentile + 1.5*IQR were capped at that value.
+The clusters per group were extracted from the heatmap above and displayed in the following order: peaks unique to E6,peaks DA in both E6 and L6, and peaks unique to L6.
+12 hour time points were added for display, but were not used for original clustering of peaks.
+
+```{r heatmaps_bw, eval=T,  warning=FALSE,  echo=FALSE,  fig.width=3.5, fig.height=7}
+ordered_bed = ordered_mat_in[,c("seqnames", "start", "end", "peak", "km")]
+
+write.table(data.frame(ordered_bed[,1:3], ID=ordered_bed$peak, km=ordered_bed$km), "extfig5_atac_heatmap_lesion.bed", sep="\t", quote=F, col.names=F, row.names = F)
+
+all_profiles =  BamBigwig_to_chipProfile(c("N.bw", "L6hr.bw", "L12hr.bw", "L5.bw", "L7.bw", "L14.bw", "L21.bw", "L28.bw", "L35.bw", "L60.bw"),testRanges ="extfig5_atac_heatmap_lesion.bed",style = "point",format = "bigwig",distanceAround = 1000)
+
+all = cbind(assay(all_profiles, 1),assay(all_profiles, 2),assay(all_profiles, 3), assay(all_profiles, 4), assay(all_profiles, 5), assay(all_profiles, 6), assay(all_profiles, 7), assay(all_profiles, 8), assay(all_profiles, 9), assay(all_profiles, 10))
+row.names(all) = rowData(all_profiles)$name
+all = all[row.names(ordered_mat),]
+```
+
+```{r hm_clsrow_dend_reorder_f_row_annot, eval=T,  warning=FALSE,  echo=FALSE,  fig.width=3.8, fig.height=7.2}
+# To improve visibility, bins with read counts greater than the 75th percentile + 1.5*IQR were capped at that value.
+
+all[all >= as.numeric((quantile(all, c(0, .75))+IQR(all)*1.5)[2])] <- as.numeric((quantile(all, c(0, .75))+IQR(all)*1.5)[2])
+
+colnames(all)  = seq(1:ncol(all))
+
+annot_col = data.frame(cond =rep(gsub(".bw", "", metadata(all_profiles)$names), each=100),row.names=colnames(all))
+annot_col$cond = factor(annot_col$cond, levels=unique(rep(gsub(".bw", "", metadata(all_profiles)$names), each=100)))
+
+#table(row.names(annotation_row) == row.names(all))
+
+rgb2hex <- function(r,g,b) sprintf('#%s',paste(as.hexmode(c(r,g,b)),collapse = ''))
+
+ha =  ComplexHeatmap::HeatmapAnnotation(foo =  ComplexHeatmap::anno_block(gp = gpar(fill = c(rgb2hex(99,99,99), rgb2hex(198,219,239), rgb2hex(107,174,214), rgb2hex(33,113,181),rgb2hex(33,113,181), rgb2hex(8,48,107),rgb2hex(8,48,107), rgb2hex(8,48,107),rgb2hex(8,48,107),rgb2hex(8,48,107))), labels = unique(rep(gsub(".bw", "", metadata(all_profiles)$names), each=100)),labels_gp = gpar(col = c("white", "black", "black", rep("white", 7)))))
+
+hm = ComplexHeatmap::Heatmap(all, border=F, cluster_rows = T, cluster_columns = F, col=rev(brewer.pal(n = 11, name ='RdBu')), show_row_names = F, heatmap_legend_param = list(direction = "horizontal", title=NULL,legend_width = unit(6, "cm")), column_split = annot_col$cond, top_annotation = ha, column_title = NULL, show_column_names =F, use_raster=F, show_row_dend = F, row_split = annotation_row$km, cluster_row_slices=F, row_title=NULL, row_gap = unit(0, "mm"), row_dend_reorder=F)
+ComplexHeatmap::draw(hm, heatmap_legend_side="bottom")
+```
+
+
+
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=FALSE,echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```

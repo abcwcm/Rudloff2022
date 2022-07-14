@@ -1,0 +1,143 @@
+---
+title: Fig. 4c
+subtitle: "Number of chromatin accessibility peak changes during each transition"
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output:
+  html_document:
+    code_folding: hide
+    theme: space
+    toc: yes
+    toc_depth: 3
+    toc_float: no
+  BiocStyle::html_document2:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+  knitrBootstrap::bootstrap_document:
+    highlight.chooser: yes
+    theme.chooser: yes
+  pdf_document:
+    toc: yes
+always_allow_html: yes
+---
+
+```{r setup, bootstrap.show.code = FALSE, results='hide', bootstrap.show.message=FALSE, warning=FALSE,  echo=FALSE, comment=FALSE}
+knitr::opts_chunk$set(bootstrap.show.code = FALSE, message=FALSE, warning=FALSE)
+suppressMessages(library(magrittr))
+suppressMessages(library(kableExtra))
+suppressMessages(library(ggplot2))
+suppressMessages(library(data.table))
+suppressMessages(library(ggrepel))
+suppressMessages(library(DESeq2))
+suppressMessages(library(DiffBind))
+suppressMessages(library(dplyr))
+```
+
+
+# Samples
+
+The following samples were part of this analysis:
+
+```{r read_in_metadata, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE, context="data"}
+decoderFile <- "atac_decoder_diffBind.csv"
+decoder.data <- read.table(decoderFile,header=T,stringsAsFactors=F, sep=",")
+decoder.data$Condition = factor(decoder.data$Condition)
+decoder.data$Condition <- relevel(decoder.data$Condition, ref = "N")
+kable(decoder.data, row.names=FALSE,  padding = 0, longtable=TRUE) %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+```{r read_in_counts, message=FALSE, warning=FALSE, cache=FALSE, echo=FALSE,  fig.width=10, fig.height=7, context="data"}
+DB <- readRDS("DB.count.Rds")
+DB <- dba.count(DB, peaks=NULL, score=DBA_SCORE_READS)
+consensus_peaks <- dba.peakset(DB, peaks=NULL, bRetrieve=TRUE)
+```
+
+```{r createDDSobject, message=FALSE, warning=FALSE, cache=FALSE, echo=FALSE,  fig.width=10, fig.height=7, context="data"}
+raw_counts = as.data.frame(mcols(consensus_peaks))
+row.names(raw_counts) = paste0(as.data.frame(consensus_peaks)$seqnames, ":",as.data.frame(consensus_peaks)$start,"-",as.data.frame(consensus_peaks)$end)
+
+#table(decoder.data$SampleID == colnames(raw_counts))
+
+dds <- DESeqDataSetFromMatrix(countData = raw_counts,
+                              colData = decoder.data,
+                              design= ~ Condition)
+dds <- DESeq(dds)
+```
+
+
+
+# Differential accessibility 
+
+The following peaks were detected as differentially accessible:
+
+```{r da, eval=T,echo=FALSE, message=FALSE, warning=FALSE, context="data"}
+varInt="Condition"
+dbs.all <- list()
+alphaTR = 0.05
+
+comps = c("N_vs_E6", "E6_vs_E12", "E12_vs_E24", "N_vs_L6", "L6_vs_L12")
+for (comp in comps){
+  levelRef <- strsplit(comp, "_vs_")[[1]][1]
+  levelTest <- strsplit(comp, "_vs_")[[1]][2]
+  cat(paste("Comparison", levelTest, "vs", levelRef, "done\n"))
+  dbs.all[[paste0(levelTest,"_vs_",levelRef)]] <- 
+    results(dds, contrast=c(varInt, levelTest, levelRef), alpha=alphaTR) %>% as.data.frame()
+}
+
+
+dbs.all.sig <- lapply(names(dbs.all), function(x){
+  subset(dbs.all[[x]], padj < alphaTR)
+   })
+names(dbs.all.sig) <- names(dbs.all)
+
+res = data.frame(sapply(dbs.all.sig, NROW))
+colnames(res) <- paste0("padj<",alphaTR)
+
+kable(res, row.names=T,  padding = 0, longtable=TRUE) %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F)
+```
+
+
+# Bar plot
+
+Number of chromatin peak accessibility changes during each transition (FDR<0.05)
+ 
+```{r bar_lesions, message=FALSE, warning=FALSE,  echo=FALSE,   fig.width=3, fig.height=5, context="data"}
+da_changes = lapply(names(dbs.all.sig), function(x){
+  name = paste0( strsplit(x, "_vs_")[[1]][2],"->",  strsplit(x, "_vs_")[[1]][1])
+  df = dbs.all.sig[[x]] %>% dplyr::summarise(contrast = name, positive = sum(log2FoldChange>0), negative = sum(log2FoldChange<0))
+  df
+}) %>% rbindlist() %>% melt()
+
+colnames(da_changes) <- c("contrast", "sign", "value")
+da_changes$type <- ifelse(grepl("L", da_changes$contrast), "lesion", "effector")
+
+da_changes$contrast  = factor(da_changes$contrast, levels=c("N->E6","E6->E12", "E12->E24", "N->L6", "L6->L12"))
+
+lesions = subset(da_changes, type == "lesion")
+lesions$contrast <- factor(lesions$contrast, levels=c("N->L6", "L6->L12"))
+
+ggplot(data=lesions, aes(x=contrast)) + 
+geom_bar(data = subset(lesions, sign == "positive"),  width=0.45,
+   aes(y = value/1000, fill = sign), stat = "identity", position = "dodge") +
+geom_bar(data = subset(lesions, sign == "negative"),  width=0.45,
+   aes(y = -value/1000, fill = sign), stat = "identity",  position = "dodge") + 
+geom_hline(yintercept = 0,colour = "black") +theme_classic(base_size = 18) + xlab("") + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) + ylab("# of peak changes (x 1k)")  + scale_fill_manual(labels=c("Closing", "Opening"), values=c("#0019f1", "#e53222")) + theme(legend.position="bottom") + theme(plot.background = element_blank(), panel.grid.minor = element_blank(), panel.grid.major = element_blank(), panel.border=element_blank(), axis.line.x = element_blank()) +  theme(legend.title=element_blank(),   axis.ticks.x=element_blank()) + theme(legend.key.size = unit(0.4, 'cm')) + theme(legend.position = c(0.80, 0.85)) 
+
+
+
+effector = subset(da_changes, type == "effector")
+effector$contrast <- factor(effector$contrast, levels=c("N->E6","E6->E12", "E12->E24"))
+
+ggplot(data=effector, aes(x=contrast)) + 
+geom_bar(data = subset(effector, sign == "positive"),  width=0.45,
+   aes(y = value/1000, fill = sign), stat = "identity", position = "dodge") +
+geom_bar(data = subset(effector, sign == "negative"),  width=0.45,
+   aes(y = -value/1000, fill = sign), stat = "identity",  position = "dodge") + 
+geom_hline(yintercept = 0,colour = "black") +theme_classic(base_size = 18) + xlab("") + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) + ylab("# of peak changes (x 1k)")  + scale_fill_manual(labels=c("Closing", "Opening"), values=c("#0019f1", "#e53222")) + theme(legend.position="bottom") + theme(plot.background = element_blank(), panel.grid.minor = element_blank(), panel.grid.major = element_blank(), panel.border=element_blank(), axis.line.x = element_blank()) +  theme(legend.title=element_blank(),   axis.ticks.x=element_blank()) + theme(legend.key.size = unit(0.4, 'cm')) + theme(legend.position = c(0.80, 0.85)) 
+```
+
+
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=FALSE,echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```

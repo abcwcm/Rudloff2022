@@ -1,0 +1,249 @@
+---
+title: Fig. 4d
+subtitle: "Chromatin accessibility heatmap."
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output:
+  html_document:
+    code_folding: hide
+    theme: space
+    toc: yes
+    toc_depth: 3
+    toc_float: no
+  BiocStyle::html_document2:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+  knitrBootstrap::bootstrap_document:
+    highlight.chooser: yes
+    theme.chooser: yes
+  pdf_document:
+    toc: yes
+always_allow_html: yes
+---
+
+
+```{r setup, bootstrap.show.code = FALSE, results='hide', bootstrap.show.message=FALSE, warning=FALSE,  echo=FALSE, comment=FALSE}
+knitr::opts_chunk$set(bootstrap.show.code = FALSE, message=FALSE, warning=FALSE)
+suppressMessages(library(magrittr))
+suppressMessages(library(kableExtra))
+suppressMessages(library(ggplot2))
+suppressMessages(library(data.table))
+suppressMessages(library(ggrepel))
+suppressMessages(library(DESeq2))
+suppressMessages(library(DiffBind))
+suppressMessages(library(dplyr))
+suppressMessages(library(pheatmap))
+suppressMessages(library(RColorBrewer))
+suppressMessages(library(VennDiagram))
+suppressMessages(library(eulerr))
+suppressMessages(library(profileplyr))
+suppressMessages(library(grid))
+suppressMessages(library(ComplexHeatmap))
+futile.logger::flog.threshold(futile.logger::ERROR, name = "VennDiagramLogger")
+```
+
+
+# Samples
+
+The following samples were part of this analysis:
+
+```{r read_in_metadata, echo=FALSE, message=FALSE, warning=FALSE, cache=FALSE, context="data"}
+decoderFile <- "atac_decoder_diffBind.csv"
+decoder.data <- read.table(decoderFile,header=T,stringsAsFactors=F, sep=",")
+decoder.data$Condition = factor(decoder.data$Condition)
+decoder.data$Condition <- relevel(decoder.data$Condition, ref = "N")
+kable(decoder.data, row.names=FALSE,  padding = 0, longtable=TRUE) %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+```{r read_in_counts, message=FALSE, warning=FALSE, cache=FALSE, echo=FALSE,  fig.width=10, fig.height=7, context="data"}
+DB <- readRDS("DB.count.Rds")
+DB <- dba.count(DB, peaks=NULL, score=DBA_SCORE_READS)
+consensus_peaks <- dba.peakset(DB, peaks=NULL, bRetrieve=TRUE)
+```
+
+```{r createDDSobject, message=FALSE, warning=FALSE,  echo=FALSE,   fig.width=10, fig.height=7, context="data"}
+raw_counts = as.data.frame(mcols(consensus_peaks))
+row.names(raw_counts) = paste0(as.data.frame(consensus_peaks)$seqnames, ":",as.data.frame(consensus_peaks)$start,"-",as.data.frame(consensus_peaks)$end)
+
+#table(decoder.data$SampleID == colnames(raw_counts))
+
+dds <- DESeqDataSetFromMatrix(countData = raw_counts,
+                              colData = decoder.data,
+                              design= ~ Condition)
+dds <- DESeq(dds, fitType = "parametric")
+```
+
+
+# Differential accessibility 
+
+The following peaks were detected as differentially accessible:
+
+```{r da, eval=T,echo=FALSE, message=FALSE, warning=FALSE,   context="data"}
+varInt="Condition"
+dbs.all <- list()
+alphaTR = 0.05
+lfcThres = 1
+
+comps = c("L6_vs_N", "E6_vs_N", "L12_vs_L6", "E12_vs_E6")
+for (comp in comps){
+  levelTest <- strsplit(comp, "_vs_")[[1]][1]
+  levelRef <- strsplit(comp, "_vs_")[[1]][2]
+  cat(paste("Comparison", levelTest, "vs", levelRef, "done\n"))
+  dbs.all[[paste0(levelTest,"_vs_",levelRef)]] <- 
+    results(dds, contrast=c(varInt, levelTest, levelRef), alpha=alphaTR) %>% as.data.frame()
+}
+
+dbs.all.sig <- lapply(names(dbs.all), function(x){
+  subset(dbs.all[[x]], padj < alphaTR & abs(log2FoldChange) > lfcThres)
+   })
+names(dbs.all.sig) <- names(dbs.all)
+
+res = data.frame(sapply(dbs.all.sig, NROW))
+colnames(res) <- paste0("padj<",alphaTR, " & ","abs(log2FoldChange)>",lfcThres)
+
+kable(res, row.names=T,  padding = 0, longtable=TRUE) %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F)
+```
+
+
+# Venn diagram
+
+```{r euler_venn, message=FALSE, warning=FALSE,  echo=FALSE,   fig.width=4, fig.height=4, context="data"}
+ll = list("N->L6" = row.names(dbs.all.sig$L6_vs_N),"N->E6" = row.names(dbs.all.sig$E6_vs_N))
+
+p = plot(euler(ll),
+     fills = c("#c6dbef", "#ccece6"),
+     edges = T,
+     fontsize = 10,
+     quantities = list(fontsize = 12), cex.axis=1)
+
+print(p)
+```
+
+# Heatmap (DESeq2 normalized)
+
+Contains all the peaks in the above venn diagram, split into three groups:
+
+(1) peaks in the intersection
+(2) peaks DA in E6 vs. N; but NOT DA in L6 vs. N
+(3) peaks DA in L6 vs. N; but NOT DA in E6 vs. N
+
+These groups of peaks were individually clustered by hierarchical clustering using pheatmap, broken into two groups each (cuttree k=2), and then combined.
+
+Heatmap is scaled by row.
+
+```{r heatmap_deseqNorm, eval=T,  warning=FALSE,  echo=FALSE,  fig.width=10, fig.height=8}
+inter =  Reduce(intersect, ll)
+in_l6 = setdiff(row.names(subset(dbs.all.sig$L6_vs_N, abs(log2FoldChange) > 1)), row.names(subset(dbs.all.sig$E6_vs_N,abs(log2FoldChange) > 1)))
+in_e6 = setdiff(row.names(subset(dbs.all.sig$E6_vs_N,abs(log2FoldChange) > 1 )),row.names(subset(dbs.all.sig$L6_vs_N, abs(log2FoldChange) > 1)))
+
+all.sig.rows = c(in_e6, inter, in_l6)
+
+log2.count.matrix =  log2(counts(dds, normalized=T)+1)
+
+decod.sub  = subset(decoder.data, type == "naive" | time == "6hr")
+log2.count.matrix = log2.count.matrix[all.sig.rows,make.names(decod.sub$SampleID)]
+
+annot_col =data.frame(cond = decod.sub$Condition,row.names=make.names(decod.sub$SampleID))
+
+annotation_row = data.frame(row.names=row.names(log2.count.matrix), cls=c(rep("in_e6",length(in_e6)), rep("inter",length(inter)), rep("in_l6",length(in_l6)))) 
+
+annotation_row$cls = factor(annotation_row$cls, levels=c("in_e6", "inter", "in_l6"))
+
+kclustcols <- rev(colorRampPalette(RColorBrewer::brewer.pal(10, "RdBu"))(50)) # color scale
+
+inter_p = pheatmap::pheatmap(log2.count.matrix[inter,], scale="row", show_rownames=F, fontsize = 9, cellwidth = 25,  main ="",  silent = T , cluster_cols = F,   column_split = annot_col$cond, color=kclustcols,row_split=annotation_row$cls, use_raster=TRUE)
+inter_p_cut = cutree(inter_p$tree_row, k=2)
+in_inter_df = log2.count.matrix[inter,][names(inter_p_cut),] %>% as.data.frame()
+in_inter_df$k = as.character(inter_p_cut)
+in_inter_df$k = ifelse(in_inter_df$k == "1", "1", "2")
+in_inter_df = in_inter_df[order(in_inter_df$k),]
+
+in_e6_p = pheatmap::pheatmap(log2.count.matrix[in_e6,], scale="row", show_rownames=F, fontsize = 9, cellwidth = 25,  main ="",  silent = T , cluster_cols = F,   column_split = annot_col$cond, color=kclustcols,row_split=annotation_row$cls, use_raster=TRUE)
+in_e6_p_cut = cutree(in_e6_p$tree_row, k=2)
+in_e6_df = log2.count.matrix[in_e6,][names(in_e6_p_cut),] %>% as.data.frame()
+in_e6_df$k = as.character(in_e6_p_cut)
+in_e6_df$k = ifelse(in_e6_df$k == "1", "3", "4")
+in_e6_df = in_e6_df[order(in_e6_df$k),]
+
+in_l6_p = pheatmap::pheatmap(log2.count.matrix[in_l6,], scale="row", show_rownames=F, fontsize = 9, cellwidth = 25,  main ="",  silent = T , cluster_cols = F,   column_split = annot_col$cond, color=kclustcols,row_split=annotation_row$cls, use_raster=TRUE)
+in_l6_p_cut = cutree(in_l6_p$tree_row, k=2)
+in_l6_df = log2.count.matrix[in_l6,][names(in_l6_p_cut),] %>% as.data.frame()
+in_l6_df$k = as.character(in_l6_p_cut)
+in_l6_df$k = ifelse(in_l6_df$k == "1", "5", "6")
+in_l6_df = in_l6_df[order(in_l6_df$k),]
+
+order_matrix = rbind(in_e6_df, in_inter_df, in_l6_df)
+
+annotation_row = data.frame(row.names=row.names(order_matrix),
+                            cls=as.factor(order_matrix$k),
+                            grp=c(rep("in_e6",nrow(in_e6_df)),
+                                   rep("inter",nrow(in_inter_df)),
+                                   rep("in_l6",nrow(in_l6_df)) ) )
+
+
+ordered_mat = order_matrix[,c("N.1", "N.3", "E6.1", "E6.2", "E6.3", "L6.1", "L6.2", "L6.3")] %>% as.matrix()
+
+pheatmap::pheatmap(ordered_mat, scale="row", show_rownames=F, fontsize = 10, cellwidth =20,  main = "DAPs",  annotation_col = annot_col,silent = F , cluster_cols = F, cluster_rows=F,annotation_row = annotation_row, gaps_col = c(2,5,8),color=kclustcols)
+```
+
+
+# Heatmap (BigWig version)
+
+This is the same heatmap as above, with the same order, but created by querying the signal in the reads per genomic content normalization (RPGC) at 1x normalization.
+Signal from each peak above was extracted +/- 1Kb from peak center in bins of 20.
+Bins with read counts greater than the 75th percentile + 1.5*IQR were capped at that value.
+The clusters per group were extracted from the heatmap above and displayed in the following order: peaks unique to E6,peaks DA in both E6 and L6, and peaks unique to L6.
+12 hour time points were added for display, but were not used for original clustering of peaks.
+
+```{r heatmaps_bw, eval=T,  warning=FALSE,  echo=FALSE,  fig.width=3.5, fig.height=7}
+ordered_df = merge(ordered_mat, annotation_row, by="row.names")
+colnames(ordered_df)[1] = "peak"
+row.names(ordered_df) = ordered_df$peak
+ordered_df = ordered_df[row.names(ordered_mat),]
+spl <- strsplit(gsub("-|:", ".", ordered_df$peak), ".", fixed = TRUE)
+ordered_df$chr = sapply(spl, "[", 1)
+ordered_df$start =sapply(spl, "[", 2)
+ordered_df$end = gsub("\\_.*","",sapply(spl, "[", 3))
+
+ordered_df = ordered_df[,c("chr", "start", "end", "peak", "cls")]
+
+write.table(data.frame(ordered_df[,1:3], ID=ordered_df$peak, cls=ordered_df$cls), "fig4_atac_heatmap.bed", sep="\t", quote=F, col.names=F, row.names = F)
+
+all_profiles =  BamBigwig_to_chipProfile(c("N.bw", "E6.bw", "E12.bw", "L6.bw", "L12.bw"),testRanges ="fig4_atac_heatmap.bed",style = "point",format = "bigwig",distanceAround = 1000)
+
+all = cbind(assay(all_profiles, 1),assay(all_profiles, 2),assay(all_profiles, 3), assay(all_profiles, 4), assay(all_profiles, 5))
+row.names(all) = rowData(all_profiles)$name
+all = all[row.names(ordered_mat),]
+```
+
+```{r hm_clsrow_dend_reorder_f_row_annot, eval=T,  warning=FALSE,  echo=FALSE,  fig.width=3.8, fig.height=7.2}
+# To improve visibility, bins with read counts greater than the 75th percentile + 1.5*IQR were capped at that value.
+
+all[all >= as.numeric((quantile(all, c(0, .75))+IQR(all)*1.5)[2])] <- as.numeric((quantile(all, c(0, .75))+IQR(all)*1.5)[2])
+
+colnames(all)  = seq(1:ncol(all))
+
+annot_col =data.frame(cond =rep(gsub(".bw", "", metadata(all_profiles)$names), each=100),row.names=colnames(all))
+annot_col$cond = factor(annot_col$cond, levels=unique(rep(gsub(".bw", "", metadata(all_profiles)$names), each=100)))
+
+#table(row.names(annotation_row) == row.names(all))
+
+annotation_row$cls = factor(annotation_row$cls, levels=c(unique(annotation_row$cls)))
+annotation_row$grp = factor(annotation_row$grp,levels=c(unique(annotation_row$grp)))
+
+ha =  ComplexHeatmap::HeatmapAnnotation(foo =  ComplexHeatmap::anno_block(gp = gpar(fill = c("#636363", "#ccece6","#99d8c9", "#c6dbef", "#6baed6")), labels = unique(rep(gsub(".bw", "", metadata(all_profiles)$names), each=100)), labels_gp = gpar(col = c("white", "black", "black", "black", "black"))))
+
+annoRow=list("grp" = c(structure(c("#218a42","#7030A0","#2171B5"), names =  c("in_e6", "inter", "in_l6"))))
+grp_levels = c("in_e6", "inter", "in_l6")
+
+hm = ComplexHeatmap::Heatmap(all, border=F, cluster_rows = T, cluster_columns = F, col=rev(brewer.pal(n = 11, name ='RdBu')), show_row_names = F, heatmap_legend_param = list(direction = "horizontal", title=NULL,legend_width = unit(6, "cm")), column_split = annot_col$cond, top_annotation = ha, column_title = NULL, show_column_names =F, use_raster=F, show_row_dend = F, row_split = annotation_row$cls, cluster_row_slices=F, row_title=NULL, row_gap = unit(0.5, "mm"), row_dend_reorder=F,left_annotation = rowAnnotation(annotation_legend_param=list(grp=list(labels=grp_levels, at=grp_levels)),df = annotation_row[,c("grp"), drop=F], show_legend = FALSE, col=annoRow, show_annotation_name = FALSE, simple_anno_size = unit(7, "bigpts")))
+
+ComplexHeatmap::draw(hm, heatmap_legend_side="bottom")
+```
+
+
+
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=FALSE,echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```

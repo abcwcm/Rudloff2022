@@ -1,0 +1,96 @@
+---
+title: Ext. Fig. 4b
+subtitle: "Principal component analysis (PCA) of RNA-SEQ data."
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output:
+  html_document:
+    code_folding: hide
+    theme: space
+    toc: yes
+    toc_depth: 3
+    toc_float: no
+  BiocStyle::html_document2:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+  knitrBootstrap::bootstrap_document:
+    highlight.chooser: yes
+    theme.chooser: yes
+  pdf_document:
+    toc: yes
+always_allow_html: yes
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+suppressMessages(library(magrittr))
+suppressMessages(library(kableExtra))
+suppressMessages(library(ggplot2))
+suppressMessages(library(data.table))
+suppressMessages(library(ggrepel))
+suppressMessages(library(DESeq2))
+suppressMessages(library(dplyr))
+suppressMessages(library(pheatmap))
+suppressMessages(library(RColorBrewer))
+suppressMessages(library(VennDiagram))
+futile.logger::flog.threshold(futile.logger::ERROR, name = "VennDiagramLogger")
+```
+
+
+```{r read_in_rna_counts, message=FALSE, warning=FALSE,  echo=FALSE, context="data"}
+counts <- read.table(file = "rnaseq.gene.counts.txt", header = TRUE, check.names=FALSE, row.names=1)
+decoderFile <- "rnaseq.decoder.txt"
+decoder.data <- fread(decoderFile) %>% as.data.frame()
+decoder.data$group <- factor(decoder.data$group, levels=c("N", "E6", "E12", "E24","L6", "L12", "L24"))
+decoder.data$type <- factor(decoder.data$type, levels=c("naive", "effector", "tumor"))
+decoder.data$replicate <- factor(decoder.data$replicate)
+decoder.data$time <- factor(decoder.data$time, levels=c("0hr", "6hr", "12hr", "24hr"))
+
+decoder.data <- decoder.data[decoder.data$sample.ID %in% colnames(counts),]
+counts <- counts[,c(decoder.data$sample.ID)]
+
+kable(decoder.data, row.names=FALSE,  padding = 0, longtable=TRUE) %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+#colnames(counts) == decoder.data$sample.ID 
+```
+
+
+
+# Samples
+
+The following samples were part of this analysis:
+
+```{r samples, message=FALSE, warning=FALSE, echo=FALSE,  context="data"}
+ kable(decoder.data[,c(-1)], row.names=FALSE,  padding = 0, longtable=TRUE) %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+# PCA
+
+Top 500 most variable genes based on VST normalized data
+
+```{r pca, message=FALSE, warning=FALSE, cache=FALSE, echo=FALSE,  fig.width=6, fig.height=5, context="data", eval=T, fig.align="center"}
+deseq2.coldata <- data.frame(decoder.data, row.names = colnames(counts), stringsAsFactors=F)
+deseq2.coldata$group <- factor(decoder.data$group)
+deseq2.cds <- DESeq2::DESeqDataSetFromMatrix(countData = counts,colData = deseq2.coldata, design = ~group)
+deseq2.cds <- estimateSizeFactors(deseq2.cds)
+deseq2.vst <- DESeq2::vst(deseq2.cds, blind=TRUE)
+
+ntop = 500
+Pvars <- rowVars(assay(deseq2.vst))
+select <- order(Pvars, decreasing = TRUE)[seq_len(min(ntop, length(Pvars)))]
+PCA <- prcomp(t(assay(deseq2.vst)[select, ]), scale = F)
+percentVar <- round(100*PCA$sdev^2/sum(PCA$sdev^2),1)
+dataGG = data.frame(PC1 = PCA$x[,1], PC2 = PCA$x[,2], sampleName = row.names(colData(deseq2.vst)),colData(deseq2.vst))
+
+out.dt <- data.table(dataGG, keep.rownames = TRUE)
+out.dt[, x_center := median(PC1), by = "group"]
+out.dt[, y_center := median(PC2), by = "group"]
+
+ggplot(dataGG, aes(PC1, PC2)) + geom_point(size = 5, aes(color = group), show.legend = T) + theme_bw(base_size =18)   + xlab( paste0("PC1: ",  round(percentVar[1],4), "% variance")) + ylab( paste0("PC2: ", round(percentVar[2],4), "% variance")) + theme(legend.position="bottom")   + geom_point(shape = 1,size=5,colour = "black") + scale_color_manual(values=c("N" = "#636363", "E24" = "#66c2a4", "E12" = "#99d8c9", "E6" = "#ccece6", "L6" = "#c6dbef", "L12"  = "#6baed6",  "L24"  = "#4398cb"), name="")   + theme(plot.background = element_blank(), panel.grid.minor = element_blank(), panel.grid.major = element_blank()) + theme(legend.position ="none") + geom_label_repel(data=unique(out.dt[,c("x_center", "y_center", "group")]), aes(x = x_center, y = y_center, label = group), inherit.aes = FALSE, fontface = "plain", size = 4, segment.color = 'transparent') 
+```
+
+
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=FALSE,echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```
