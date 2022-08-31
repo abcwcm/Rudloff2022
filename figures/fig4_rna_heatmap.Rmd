@@ -106,7 +106,7 @@ kable(res, row.names=T,  padding = 0, longtable=TRUE) %>%  kable_styling(bootstr
 negative_regulators = c("Rgs16", "Dusp4", "Pdcd1", "Cd226", "Ptpn22", "Ctla4", "Tigit")
 inflammatory_genes = c("Mx1", "Ifit3", "Oas2", "Isg15")
 effector_genes = c("Ifng", "Gzmb", "Gzma", "Fasl")
-tfs = c("Irf7", "Batf", "Eomes", "Stat1", "Tbx21", "Bach2", "Id3")
+tfs = c("Irf7", "Batf", "Stat1", "Tbx21", "Bach2", "Id3")
 all = c(negative_regulators,inflammatory_genes,effector_genes,tfs)
 
 breaksList = seq(-1.5, 1.5, by = 0.1)
