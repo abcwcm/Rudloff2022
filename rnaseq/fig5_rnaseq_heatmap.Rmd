@@ -1,0 +1,164 @@
+---
+title: fig 5g
+subtitle:  "Heatmap showing differential gene expression between TCRTAG in tumor versus infection versus naive at 6,12, and 24h from selected pathways (adjusted P <0.05, |Log2FC| >1), z-score normalization across rows."
+author: "pz"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    highlight: tango
+    df_print: paged
+    toc: yes
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE, result='hold',fig.width=10,tidy=TRUE, cache=FALSE)
+knitr::opts_knit$set(progress=TRUE,verbose=TRUE)
+```
+
+```{r libraries, cache=FALSE}
+library(data.table)
+library(magrittr)
+library(knitr)
+library(ggplot2); theme_set(theme_bw(base_size = 16))
+library(DESeq2)
+library(dplyr)
+library(pheatmap)
+library(RColorBrewer)
+rgb2hex <- function(r,g,b) sprintf('#%s',paste(as.hexmode(c(r,g,b)),collapse = ''))
+```
+
+
+
+```{r decoder}
+decoderFile <- "decoder.txt"
+decoder.data <- fread(decoderFile) %>% as.data.frame()
+decoder.data$group <- factor(decoder.data$group, levels = c("N", "E6", "E12", "E24", "L6", "L12", "L24"))
+decoder.data$type <- factor(decoder.data$type, levels = c("naive", "effector", "tumor"))
+decoder.data$time <- factor(decoder.data$time, levels = c("0hr", "6hr", "12hr", "24hr"))
+decoder.data$replicate <- factor(decoder.data$replicate)
+decoder.data = decoder.data[order(decoder.data$group),]
+row.names(decoder.data) = decoder.data$sample.ID
+```
+
+```{r counts}
+counts <- read.table(file = "gene.counts.txt", header = TRUE, check.names=FALSE, row.names=1)
+decoder.data <- decoder.data[decoder.data$sample.ID %in% colnames(counts),]
+
+if (!identical(colnames(counts), decoder.data$sample.ID)) {
+  stop("Column names in counts do not match sample IDs in decoder data")
+}
+
+counts <- counts[,c(decoder.data$sample.ID)]
+```
+
+# Samples
+
+The following samples were part of this analysis:
+
+```{r samples}
+as_tibble(decoder.data)
+```
+
+
+# Differential expression analysis
+
+```{r createDDS}
+dds <- DESeq2::DESeqDataSetFromMatrix(countData = counts, 
+                                      colData = decoder.data, 
+                                      design = ~ group)
+
+keep <- edgeR::filterByExpr(counts(dds), design = model.matrix(~ group, data = colData(dds)))
+dds <- dds[keep,]
+
+dds <- estimateSizeFactors(dds)
+vsd <- DESeq2::vst(dds, blind = TRUE)
+normCounts = assay(vsd)
+dds <- DESeq(dds)
+```
+
+
+```{r deseq2}
+varInt="group"
+de.all <- list()
+alphaTR = 0.05
+lfcThres = 1
+
+for (comp in combn(nlevels(colData(dds)[,varInt]), 2, simplify=FALSE)){
+  levelRef <- levels(colData(dds)[,varInt])[comp[1]]
+  levelTest <- levels(colData(dds)[,varInt])[comp[2]]
+  de.all[[paste0(levelTest,"_vs_",levelRef)]] <- 
+    results(dds, contrast=c(varInt, levelTest, levelRef), alpha=alphaTR) %>% as.data.frame()
+}
+```
+
+
+The following genes were detected as differentially expressed (adjusted p < `r alphaTR` and abs(log2FoldChange) > `r lfcThres`):
+
+
+```{r printDEGtable}
+de.all.sig <- lapply(de.all, subset, padj < alphaTR & abs(log2FoldChange) > lfcThres)
+
+res =  as.data.frame(sapply(de.all.sig, nrow))
+colnames(res) <- paste0("padj<",alphaTR, " & ","abs(log2FoldChange)>",lfcThres)
+
+rel.contrs = 1:nrow(res)
+
+as_tibble(cbind(res,"contrast #"=rel.contrs) %>%  tibble::rownames_to_column(var="contrast"))
+```
+
+
+# Heatmap of select genes
+
+
+Heatmap of genes of interest used VST normalized data, centered and scaled by row.
+
+```{r heatmap, fig.height=9, fig.width=10}
+# gene lists
+negative_regulators <- c("Dusp4", "Rgs16", "Pdcd1", "Ptpn22")
+inflammatory_genes <- c("Mx1", "Ifit3", "Oas2", "Isg15")
+effector_genes <- c("Ifng", "Gzmb", "Gzma", "Tnf")
+tfs <- c("Irf7", "Batf", "Stat1", "Tbx21", "Bach2", "Id3")
+all_genes <- c(negative_regulators, inflammatory_genes, effector_genes, tfs)
+
+breaksList = seq(-1.5, 1.5, by = 0.1)
+
+annotation_colors = list(group=c("N"   = "#636363",
+                                 "E6"  = "#ccece6", 
+                                 "E12" = "#66c2a4",
+                                 "E24" = "#238b45",
+                                 "L6"  = "#c6dbef", 
+                                 "L12" = "#6baed6",  
+                                 "L24" = "#4398cb"))
+
+pheatmap(normCounts[all_genes,decoder.data$sample.ID],
+         scale="row", 
+         color = colorRampPalette(rev(brewer.pal(n = 5, name = "RdBu")))(length(breaksList)), 
+         breaks = breaksList, 
+         cluster_rows = FALSE, 
+         cluster_cols = FALSE, 
+         annotation_col = decoder.data[,"group", drop=F], 
+         annotation_colors = annotation_colors,
+         gaps_col = c(3,12), 
+         cellwidth = 20, 
+         cellheight = 20, 
+         main = "All",
+         show_colnames = FALSE,
+         fontsize_row = 12,  
+         gaps_row = c(4,8,12))
+```
+
+
+Of the above genes, the following are DE in at least one of these contrasts (L6_vs_E6, L12_vs_E12, L24_vs_E24,L24_vs_N,L12_vs_N,L6_vs_N,E24_vs_N,E6_vs_N,E12_vs_N): `r all_genes[all_genes %in% c(row.names(de.all.sig$L12_vs_E12), row.names(de.all.sig$L6_vs_E6), row.names(de.all.sig$L24_vs_E24),row.names(de.all.sig$L24_vs_N),row.names(de.all.sig$L12_vs_N),row.names(de.all.sig$L6_vs_N),row.names(de.all.sig$E24_vs_N),row.names(de.all.sig$E6_vs_N),row.names(de.all.sig$E12_vs_N))]`.
+
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=FALSE,echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```

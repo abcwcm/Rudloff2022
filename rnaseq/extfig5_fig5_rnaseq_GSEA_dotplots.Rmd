@@ -1,0 +1,266 @@
+---
+title: ext/fig 5
+subtitle:  "Dotplots from fGSEA results"
+author: "pz"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    highlight: tango
+    df_print: paged
+    toc: yes
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE, result='hold',fig.width=10,tidy=TRUE, cache=FALSE)
+knitr::opts_knit$set(progress=TRUE,verbose=TRUE)
+```
+
+```{r libraries, cache=FALSE}
+library(data.table)
+library(magrittr)
+library(knitr)
+library(ggplot2); theme_set(theme_bw(base_size = 16))
+library(DESeq2)
+library(dplyr)
+library(pheatmap)
+library(RColorBrewer)
+library(fgsea)
+library(openxlsx)
+library(AnnotationDbi)
+library(data.table)
+library(clusterProfiler)
+library(psych)
+library(openxlsx)
+rgb2hex <- function(r,g,b) sprintf('#%s',paste(as.hexmode(c(r,g,b)),collapse = ''))
+```
+
+
+
+
+# L vs. E dotplots 
+
+```{r}
+read_custom_and_immun_sheets = function(xlsxFile, ...) {
+  sheet_names = c("custom", "immunesigdb")
+  sheet_list = as.list(rep(NA, length(sheet_names)))
+  names(sheet_list) = sheet_names
+  for (sn in sheet_names) {
+    sheet_list[[sn]] = openxlsx::read.xlsx(xlsxFile, sheet=sn, ...)
+    sheet_list[[sn]]$source = sn
+  }
+  return(sheet_list)
+}
+```
+
+```{r,  fig.width=11.5, fig.height=4, eval=T}
+L6_vs_E6 = rbindlist( read_custom_and_immun_sheets("./rnaseq_fgsea_out/deseq2_L6_vs_E6_fgsea_padj0.05.res.xlsx"))
+L6_vs_E6$group = "L6_vs_E6"
+
+L12_vs_E12 =rbindlist( read_custom_and_immun_sheets("./rnaseq_fgsea_out/deseq2_L12_vs_E12_fgsea_padj0.05.res.xlsx"))
+L12_vs_E12$group = "L12_vs_E12"
+
+L24_vs_E24 = rbindlist( read_custom_and_immun_sheets("./rnaseq_fgsea_out/deseq2_L24_vs_E24_fgsea_padj0.05.res.xlsx"))
+L24_vs_E24$group = "L24_vs_E24"
+
+all = rbind(L6_vs_E6,L12_vs_E12,L24_vs_E24)
+
+poi = c("GSE41867_DAY6_EFFECTOR_VS_DAY30_EXHAUSTED_CD8_TCELL_LCMV_CLONE13_UP",
+        "GSE41867_MEMORY_VS_EXHAUSTED_CD8_TCELL_DAY30_LCMV_UP",
+        "L5_VS_E5_UP",
+        "GSE30962_ACUTE_VS_CHRONIC_LCMV_PRIMARY_INF_CD8_TCELL_DN",
+        "TST_LCMVcl13_Shared_Schietinger_UP",
+        "GSE15930_STIM_VS_STIM_AND_IL12_24H_CD8_T_CELL_UP",
+        "GSE15930_STIM_VS_STIM_AND_IFNAB_48H_CD8_T_CELL_UP",
+        "HALLMARK_INTERFERON_ALPHA_RESPONSE",
+        "HALLMARK_INTERFERON_GAMMA_RESPONSE")
+
+
+sub = all[which(all$pathway %in% poi),]
+sub = sub[,c("pathway", "NES", "padj", "group", "source")]
+sub = sub[sub$padj < 0.05,]
+
+
+# these pathways were in custom and immune, but they are sig either way.  let's take from custom
+#sub[sub$pathway == "GSE41867_DAY15_EFFECTOR_VS_DAY30_EXHAUSTED_CD8_TCELL_LCMV_CLONE13_UP"]$padj < 0.05
+#sub[sub$pathway == "GSE41867_DAY6_EFFECTOR_VS_DAY30_EXHAUSTED_CD8_TCELL_LCMV_CLONE13_UP"]$padj < 0.05
+#sub[sub$pathway == "GSE41867_MEMORY_VS_EXHAUSTED_CD8_TCELL_DAY30_LCMV_UP"]$padj < 0.05
+#sub[sub$pathway == "GSE30962_ACUTE_VS_CHRONIC_LCMV_PRIMARY_INF_CD8_TCELL_DN"]$padj < 0.05
+sub = sub[!which(sub$pathway %in% c("GSE41867_DAY15_EFFECTOR_VS_DAY30_EXHAUSTED_CD8_TCELL_LCMV_CLONE13_UP", "GSE41867_DAY6_EFFECTOR_VS_DAY30_EXHAUSTED_CD8_TCELL_LCMV_CLONE13_UP", "GSE41867_MEMORY_VS_EXHAUSTED_CD8_TCELL_DAY30_LCMV_UP", "GSE30962_ACUTE_VS_CHRONIC_LCMV_PRIMARY_INF_CD8_TCELL_DN") & sub$source == "immunesigdb"),] 
+
+
+sub$group = factor(sub$group, levels=c("L6_vs_E6", "L12_vs_E12", "L24_vs_E24"))
+
+sub$org = "NA"
+
+sub[sub$pathway %in%  c("HALLMARK_INTERFERON_ALPHA_RESPONSE",
+                        "HALLMARK_INTERFERON_GAMMA_RESPONSE",
+                        "GSE15930_STIM_VS_STIM_AND_IFNAB_48H_CD8_T_CELL_UP",
+                        "GSE15930_STIM_VS_STIM_AND_IL12_24H_CD8_T_CELL_UP")]$org = "a"
+
+sub[sub$pathway %in%  c("GSE41867_DAY6_EFFECTOR_VS_DAY30_EXHAUSTED_CD8_TCELL_LCMV_CLONE13_UP",
+                        "GSE41867_MEMORY_VS_EXHAUSTED_CD8_TCELL_DAY30_LCMV_UP",
+                        "L5_VS_E5_UP",
+                        "GSE30962_ACUTE_VS_CHRONIC_LCMV_PRIMARY_INF_CD8_TCELL_DN",
+                        "TST_LCMVcl13_Shared_Schietinger_UP")]$org = "b"
+
+sub$pathway = factor(sub$pathway, levels= rev(c("HALLMARK_INTERFERON_ALPHA_RESPONSE",
+                        "HALLMARK_INTERFERON_GAMMA_RESPONSE",
+                        "GSE15930_STIM_VS_STIM_AND_IFNAB_48H_CD8_T_CELL_UP",
+                        "GSE15930_STIM_VS_STIM_AND_IL12_24H_CD8_T_CELL_UP",
+                        "GSE41867_DAY6_EFFECTOR_VS_DAY30_EXHAUSTED_CD8_TCELL_LCMV_CLONE13_UP",
+                        "GSE41867_MEMORY_VS_EXHAUSTED_CD8_TCELL_DAY30_LCMV_UP",
+                        "L5_VS_E5_UP",
+                        "GSE30962_ACUTE_VS_CHRONIC_LCMV_PRIMARY_INF_CD8_TCELL_DN",
+                        "TST_LCMVcl13_Shared_Schietinger_UP")))
+
+sub$group = factor(sub$group, levels=c("L6_vs_E6", "L12_vs_E12", "L24_vs_E24"))
+ggplot(sub, aes(x = group, y = pathway, color = NES, size = -log10(padj))) +
+  geom_point() +
+  theme_bw(base_size = 16) +
+  scale_size_continuous(range = c(3, 10)) +
+  scale_colour_gradientn(colours=colorRampPalette(rev(brewer.pal(n = 5, name = "RdYlBu")))(100))+
+  facet_grid(org ~ ., scales = "free",labeller = label_wrap_gen(width = 15)) +
+  theme(strip.background = element_blank(),
+        strip.text.y = element_text(angle = 0, hjust = 0),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+        axis.title = element_blank())
+
+```
+
+
+# L/E vs naive dotplots 
+
+```{r}
+read_hallmark_and_kegg_readctome_sheets = function(xlsxFile, ...) {
+  sheet_names = c("kegg", "hallmark", "reactome", "immunesigdb")
+  sheet_list = as.list(rep(NA, length(sheet_names)))
+  names(sheet_list) = sheet_names
+  for (sn in sheet_names) {
+    sheet_list[[sn]] = openxlsx::read.xlsx(xlsxFile, sheet=sn, ...)
+    sheet_list[[sn]]$source = sn
+  }
+  return(sheet_list)
+}
+```
+
+```{r l_e_vs_n, fig.width=10.5, fig.height=8.25}
+E6_vs_N = rbindlist( read_hallmark_and_kegg_readctome_sheets("./rnaseq_fgsea_out/deseq2_E6_vs_N_fgsea_padj0.05.res.xlsx"))
+E6_vs_N$group = "E6_vs_N"
+
+E12_vs_N = rbindlist( read_hallmark_and_kegg_readctome_sheets("./rnaseq_fgsea_out/deseq2_E12_vs_N_fgsea_padj0.05.res.xlsx"))
+E12_vs_N$group = "E12_vs_N"
+
+E24_vs_N = rbindlist( read_hallmark_and_kegg_readctome_sheets("./rnaseq_fgsea_out/deseq2_E24_vs_N_fgsea_padj0.05.res.xlsx"))
+E24_vs_N$group = "E24_vs_N"
+
+L6_vs_N = rbindlist( read_hallmark_and_kegg_readctome_sheets("./rnaseq_fgsea_out/deseq2_L6_vs_N_fgsea_padj0.05.res.xlsx"))
+L6_vs_N$group = "L6_vs_N"
+
+L12_vs_N = rbindlist( read_hallmark_and_kegg_readctome_sheets("./rnaseq_fgsea_out/deseq2_L12_vs_N_fgsea_padj0.05.res.xlsx"))
+L12_vs_N$group = "L12_vs_N"
+
+L24_vs_N = rbindlist( read_hallmark_and_kegg_readctome_sheets("./rnaseq_fgsea_out/deseq2_L24_vs_N_fgsea_padj0.05.res.xlsx"))
+L24_vs_N$group = "L24_vs_N"
+
+
+poi <- c(
+  "GSE15930_NAIVE_VS_24H_IN_VITRO_STIM_CD8_TCELL_DN",
+  "GSE15930_NAIVE_VS_48H_IN_VITRO_STIM_CD8_TCELL_DN",
+  "GSE10239_NAIVE_VS_DAY4.5_EFF_CD8_TCELL_DN",
+  "GOLDRATH_NAIVE_VS_EFF_CD8_TCELL_DN",
+  "REACTOME_RRNA_PROCESSING", #
+  "REACTOME_EUKARYOTIC_TRANSLATION_INITIATION", # 
+  "REACTOME_EUKARYOTIC_TRANSLATION_ELONGATION",#
+  "REACTOME_TRANSLATION", # 
+  "REACTOME_GLYCOSPHINGOLIPID_METABOLISM", # 
+  "REACTOME_GPVI_MEDIATED_ACTIVATION_CASCADE", #
+  "HALLMARK_MYC_TARGETS_V1", #
+  "HALLMARK_MYC_TARGETS_V2", #
+  "HALLMARK_MTORC1_SIGNALING", # 
+  "HALLMARK_OXIDATIVE_PHOSPHORYLATION", #
+  "HALLMARK_GLYCOLYSIS", #
+  "HALLMARK_HEME_METABOLISM", #
+  "HALLMARK_MITOTIC_SPINDLE", #
+  "KEGG_RIBOSOME", #
+  "KEGG_SPLICEOSOME", #
+  "KEGG_PYRIMIDINE_METABOLISM", #
+  "KEGG_OXIDATIVE_PHOSPHORYLATION", #
+  "KEGG_CYTOKINE_CYTOKINE_RECEPTOR_INTERACTION", #
+  "KEGG_PURINE_METABOLISM",#
+  "KEGG_PROTEASOME", #
+  "KEGG_PHOSPHATIDYLINOSITOL_SIGNALING_SYSTEM", #
+  "KEGG_REGULATION_OF_ACTIN_CYTOSKELETON", # 
+  "KEGG_LEUKOCYTE_TRANSENDOTHELIAL_MIGRATION", #
+  "KEGG_LYSOSOME" #
+)
+
+all = rbind(E6_vs_N,E12_vs_N,E24_vs_N, L6_vs_N, L12_vs_N,L24_vs_N)
+
+
+
+# filter for poi
+sub = all[which(all$pathway %in% poi),]
+sub = sub[,c("pathway", "NES", "padj", "group", "source")]
+sub = sub[sub$padj < 0.05,]
+
+sub_cast = dcast(sub[,c("pathway", "NES",  "group")], pathway ~ group, value.var="NES") %>% as.data.frame()
+row.names(sub_cast) = sub_cast$pathway
+sub_cast$pathway = NULL
+
+levels = lapply(unique(sub$source), function(x){
+  suber = subset(sub, source ==x )
+  df = dcast(suber[,c("pathway", "group", "NES")], pathway~group) %>% as.data.frame()
+  row.names(df) = df$pathway
+  df$pathway = NULL
+  df[is.na(df)] = 0
+    rev(names(sort(rowMeans(df), decreasing = T)))
+}) %>% unlist()
+
+sub$pathway = factor(sub$pathway, levels=c(levels))
+sub$source = factor(sub$source, c("immunesigdb", "kegg", "hallmark", "reactome"))
+sub$group = factor(sub$group, levels=c("E6_vs_N", "E12_vs_N", "E24_vs_N", "L6_vs_N", "L12_vs_N", "L24_vs_N"))
+
+
+ggplot(sub, aes(x=group, y=pathway, color=NES, size=-log10(padj)) ) + 
+  geom_point() + 
+  theme_bw(base_size=16) + 
+  scale_size_continuous(range = c(2, 7)) +  
+  scale_colour_gradientn(colours=colorRampPalette(rev(brewer.pal(n = 5, name = "RdYlBu")))(100))  + 
+  theme(strip.background = element_blank()) + theme(strip.text.y = element_text(angle=0, hjust=0)) + 
+  ylab("") +
+  facet_grid(source~., scales="free_y", space="free_y", labeller = label_wrap_gen(width=15)) + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))  + 
+  theme(strip.background = element_blank(),  strip.text.y = element_blank()) +
+  xlab("") 
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=FALSE,echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```
