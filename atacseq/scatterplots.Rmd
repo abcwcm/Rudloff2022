@@ -1,0 +1,216 @@
+---
+title: Fig5
+subtitle:  "Principal component analysis (PCA) of ATAC-SEQ data."
+author: "pz"
+date: 'April 16, 2023'
+output:
+  html_document:
+    highlight: tango
+    df_print: paged
+    toc: yes
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE, result='hold',fig.width=10,tidy=TRUE, cache=FALSE)
+knitr::opts_knit$set(progress=TRUE,verbose=TRUE)
+```
+
+```{r libraries, cache=FALSE}
+knitr::opts_chunk$set(bootstrap.show.code = FALSE, message=FALSE, warning=FALSE)
+library(data.table)
+library(magrittr)
+library(knitr)
+library(ggplot2); theme_set(theme_bw(base_size = 16))
+library(DESeq2)
+library(dplyr)
+library(openxlsx)
+library(AnnotationDbi)
+```
+
+
+```{r decoder}
+decoderFile <- "atac_decoder.csv"
+decoder.data <- read.table(decoderFile,header=T,stringsAsFactors=F, sep=",")
+decoder.data$SampleID = make.names(decoder.data$SampleID)
+decoder.data$Condition = factor(decoder.data$Condition)
+decoder.data$Condition <- relevel(decoder.data$Condition, ref = "N")
+```
+
+
+```{r loadDESeq2Object}
+# see runDiffBind.R, runSVA.R
+load("sva_dds_vsd.RData")
+```
+
+
+
+# Samples
+
+The following samples were part of this analysis:
+
+```{r samples}
+as_tibble(decoder.data)
+```
+
+
+
+
+# Differential accessibility 
+
+The following peaks were detected as differentially accessible:
+
+```{r loadDDSobject}
+load("sva_dds_vsd.RData")
+```
+
+
+```{r da}
+varInt="Condition"
+dbs.all <- list()
+alphaTR = 0.05
+lfcThres = 0
+
+comps = c("L7d_vs_L14d",
+          "L1d_vs_L5d",
+          "N_vs_L6hr",
+          "N_vs_E6hr",
+          "E24hr_vs_E5d",
+          "E5d_vs_M") 
+for (comp in comps){
+  levelRef <- strsplit(comp, "_vs_")[[1]][1]
+  levelTest <- strsplit(comp, "_vs_")[[1]][2]
+  cat(paste("Comparison", levelTest, "vs", levelRef, "done\n"))
+  dbs.all[[paste0(levelTest,"_vs_",levelRef)]] <-     results(dds, contrast=c(varInt, levelTest, levelRef), alpha=alphaTR) %>% as.data.frame()
+}
+```
+
+
+The following genes were detected as differentially expressed (adjusted p < `r alphaTR` and abs(log2FoldChange) > `r lfcThres`):
+
+```{r printDEGtable}
+dbs.all.sig <- lapply(names(dbs.all), function(x){
+  subset(dbs.all[[x]], padj < alphaTR & abs(log2FoldChange) > lfcThres)
+   })
+names(dbs.all.sig) <- names(dbs.all)
+
+res = data.frame(sapply(dbs.all.sig, NROW))
+colnames(res) <-  paste0("padj<",alphaTR, " & ","abs(log2FoldChange)>",lfcThres)
+
+rel.contrs = 1:nrow(res)
+
+as_tibble(cbind(res,"contrast #"=rel.contrs) %>%  tibble::rownames_to_column(var="contrast"))
+```
+
+
+# Scatterplots {.tabset}
+
+```{r}
+#genecode.txdb<- makeTxDbFromGFF("gencode.vM25.annotation.gtf", format="gtf", organism = "Mus musculus")
+#saveDb(genecode.txdb, 'txdb.gencodevM25.sqlite')
+genecode.txdb = loadDb("txdb.gencodevM25.sqlite")
+```
+
+```{r , fig.height=4, fig.width=6, results="asis"}
+pairs=c("L6hr_vs_N-L5d_vs_L1d",
+        "L5d_vs_L1d-L14d_vs_L7d",
+        "E6hr_vs_N-E5d_vs_E24hr",
+        "E5d_vs_E24hr-M_vs_E5d")
+
+lapply(pairs, function(pair){
+  cat("\n\n##",pair, "\n\n")
+  x_name = strsplit(pair, "-")[[1]][1]
+  y_name = strsplit(pair, "-")[[1]][2]
+  x = dbs.all[[x_name]]
+  y = dbs.all[[y_name]]
+  if(length(table(is.na(x$padj))) > 1) x[is.na(x$padj),]$padj = 1 # not exactly true  
+  if(length(table(is.na(y$padj))) > 1) y[is.na(y$padj),]$padj = 1 # not exactly true  
+  
+  merged = merge(as.data.frame(x), as.data.frame(y), by="row.names")
+  merged$sig = ifelse(merged$padj.x < 0.05 & merged$padj.y < 0.05, "sig", "n.s.")
+  merged$sig = factor(merged$sig)
+  
+  
+  merged$peak = merged$Row.names
+  spl <- strsplit(gsub("-|:", ".", merged$peak), ".", fixed = TRUE)
+  merged$seqnames = sapply(spl, "[", 1)
+  merged$start =sapply(spl, "[", 2)
+  merged$end = gsub("\\_.*","",sapply(spl, "[", 3))
+
+  merged = merged %>%
+    mutate(group = case_when(
+      padj.x < 0.05 & log2FoldChange.x > 0 & padj.y < 0.05 & log2FoldChange.y > 0 ~ "UR",
+      padj.x < 0.05 & log2FoldChange.x > 0 & padj.y > 0.05 ~ "MR",
+      padj.x < 0.05 & log2FoldChange.x > 0 & padj.y < 0.05 & log2FoldChange.y < 0 ~ "LR",
+      padj.x > 0.05 & padj.y < 0.05 & log2FoldChange.y < 0 ~ "LM",
+      padj.x < 0.05 & log2FoldChange.x < 0 & padj.y < 0.05 & log2FoldChange.y < 0 ~ "LL",
+      padj.x < 0.05 & log2FoldChange.x < 0 & padj.y > 0.05 ~ "ML",
+      padj.x < 0.05 & log2FoldChange.x < 0 & padj.y < 0.05  & log2FoldChange.y > 0 ~ "UL",
+      padj.x > 0.05 & padj.y < 0.05  & log2FoldChange.y > 0 ~ "UM",
+      TRUE ~ "NA"
+    )) 
+  
+  merged$group2[merged$group == "UR"] <- "reinforced"
+  merged$group2[merged$group == "MR"] <- "stable"
+  merged$group2[merged$group == "LR"] <- "transient"
+  merged$group2[merged$group == "LM"] <- "int"
+  merged$group2[merged$group == "LL"] <- "reinforced"
+  merged$group2[merged$group == "ML"] <- "stable"
+  merged$group2[merged$group == "UL"] <- "transient"
+  merged$group2[merged$group == "UM"] <- "int"
+  merged$group2 = factor(merged$group2, levels=c("int", "reinforced", "transient", "stable"))
+
+  table(merged[which(merged$group == "NA"),]$padj.y < 0.05)
+  table(merged[which(merged$group == "NA"),]$padj.x < 0.05)
+  table(merged[merged$group == "NA",]$sig)
+  table(merged[is.na(merged$group2),]$padj.x < 0.05)
+  table(merged[is.na(merged$group2),]$padj.y < 0.05)
+  
+  stats_a =  as.data.frame(merged) %>% dplyr::group_by(group, group2) %>% dplyr::tally()
+  stats_b = reshape2::melt(table(merged$group2))
+  stats_b = rbind(stats_b,  data.frame(Var1 = "total_peaks", value=length(merged)))
+  stats_c = reshape2::melt(table(merged$group))
+  stats_c = rbind(stats_c,  data.frame(Var1 = "total_peaks", value=length(merged)))
+  
+  wb <- createWorkbook()
+  addWorksheet(wb, "group")
+  writeData(wb, "group", stats_c, rowNames=T, keepNA=T) 
+  addWorksheet(wb, "group2")
+  writeData(wb, "group2", stats_b, rowNames=T, keepNA=T) 
+  addWorksheet(wb, "group_group2")
+  writeData(wb, "group_group2", stats_a, rowNames=T, keepNA=T) 
+  saveWorkbook(wb = wb, file =  paste0("scatter_unfiltered_",x_name,"_vs_",y_name,".stats.xlsx"), overwrite=T)
+
+  p = ggplot(merged[!is.na(merged$group2),], aes(x = log2FoldChange.x, y = log2FoldChange.y, color=group2)) + geom_point(alpha = 0.6, size=0.8)  + theme_bw() + xlab(paste0("log2(",x_name,")")) + ylab(paste0("log2(",y_name,")")) + scale_colour_brewer(palette = "PuOr")  +  xlim(-6,6) + ylim(-6,6)
+  print(p)
+  
+  # convert to GR and annotate w /ChIPseeker
+  merged_gr = GRanges(merged)
+  merged_gr <- ChIPseeker::annotatePeak(merged_gr, tssRegion=c(-1000, 1000), TxDb=genecode.txdb, annoDb="org.Mm.eg.db", verbose=FALSE)
+  merged_gr_df <- as.data.frame(merged_gr)
+  merged_gr_df[is.na(merged_gr_df$SYMBOL),]$SYMBOL = "NA"
+  merged_gr_df$pdcd1 = ifelse(merged_gr_df$SYMBOL == "Pdcd1", TRUE, FALSE)
+  p2 = ggplot(merged_gr_df[!is.na(merged$group2),], aes(x = log2FoldChange.x, y = log2FoldChange.y, color=pdcd1)) + geom_point(alpha = 0.4, size=0.5)  + theme_bw() + xlab(paste0("log2(",x_name,")")) + ylab(paste0("log2(",y_name,")")) + scale_colour_manual(values=c("gray", "red"))  +  xlim(-6,6) + ylim(-6,6) +   geom_point(data = subset(merged_gr_df, pdcd1 == TRUE), aes(x=log2FoldChange.x, y=log2FoldChange.y), alpha = 1, size=2)
+  print(p2)
+  
+  colnames(merged) = gsub(".x", paste0(".",x_name), colnames(merged))
+  colnames(merged) = gsub(".y", paste0(".",y_name), colnames(merged))
+  write.xlsx(merged, paste0("scatter_unfiltered_",x_name,"_vs_",y_name,".xlsx"))
+  
+
+}) %>% invisible()
+```
+
+
+
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=FALSE,echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```
+

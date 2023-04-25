@@ -1,0 +1,282 @@
+---
+title: Fig 7
+subtitle:  "Homer."
+author: "pz"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    highlight: tango
+    df_print: paged
+    toc: yes
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+    toc_depth: 3
+    code_folding: hide
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE, result='hold',fig.width=10,tidy=FALSE, cache=FALSE)
+knitr::opts_knit$set(progress=TRUE,verbose=TRUE)
+```
+
+```{r libraries, cache=FALSE}
+library(data.table)
+library(magrittr)
+library(knitr)
+library(ggplot2); theme_set(theme_bw(base_size = 16))
+library(DESeq2)
+library(tidyverse)
+library(eulerr)
+library(profileplyr)
+library(grid)
+library(ComplexHeatmap)
+library(RColorBrewer)
+rgb2hex <- function(r,g,b) sprintf('#%s',paste(as.hexmode(c(r,g,b)),collapse = ''))
+```
+
+
+
+```{r decoder}
+decoderFile <- "atac_decoder.csv"
+decoder.data <- read.table(decoderFile,header=T,stringsAsFactors=F, sep=",")
+decoder.data$SampleID = make.names(decoder.data$SampleID)
+decoder.data$Condition = factor(decoder.data$Condition)
+decoder.data$Condition <- relevel(decoder.data$Condition, ref = "N")
+decoder.data = subset(decoder.data, (Condition %in% c("N", "L10d" ,"P10d","L1d", "P1d", "L5d", "P5d", "M")))
+decoder.data = subset(decoder.data, batch == "m2023" | Condition == "M")
+decoder.data$Condition <- relevel(decoder.data$Condition, ref = "N")
+decoder.data$Condition <- factor(decoder.data$Condition, levels = c("N", "M", "L1d", "L5d", "L10d", "P1d", "P5d", "P10d"))
+decoder.data = with(decoder.data, decoder.data[order(Condition),])
+```
+
+
+```{r loadDESeq2Object}
+# see runDiffBind.R, createParkingDDSObject_noSVA.R
+load("parking_dds.RData")
+vsd <- DESeq2::vst(dds, blind=TRUE)
+normCounts = assay(vsd)
+baseMeanPerLvl <- sapply( levels(vsd$Condition), function(lvl) rowMeans( assay(vsd)[,vsd$Condition == lvl, drop=F]))
+```
+
+# Samples
+
+The following samples were part of this analysis:
+
+```{r samples}
+as_tibble(decoder.data)
+```
+
+# Differential accessibility analysis
+
+The following peaks were detected as differentially accessible:
+
+
+```{r da, eval=T,echo=FALSE, message=FALSE, warning=FALSE,   context="data"}
+varInt="Condition"
+dbs.all <- list()
+alphaTR = 0.05
+lfcThres = 1
+
+
+comps = c("P5d_vs_M")
+for (comp in comps){
+  levelRef <- strsplit(comp, "_vs_")[[1]][1]
+  levelTest <- strsplit(comp, "_vs_")[[1]][2]
+  dbs.all[[paste0(levelTest,"_vs_",levelRef)]] <- 
+    results(dds, contrast=c(varInt, levelTest, levelRef), alpha=alphaTR) %>% as.data.frame()
+}
+names(dbs.all) = gsub("hr", "", names(dbs.all))
+```
+
+The following genes were detected as differentially expressed (adjusted p < `r alphaTR` and abs(log2FoldChange) > `r lfcThres`):
+
+```{r printDEGtable}
+dbs.all.sig <- lapply(names(dbs.all), function(x){
+  subset(dbs.all[[x]], padj < alphaTR & abs(log2FoldChange) > lfcThres)
+   })
+names(dbs.all.sig) <- names(dbs.all)
+
+res = data.frame(sapply(dbs.all.sig, NROW))
+colnames(res) <-  paste0("padj<",alphaTR, " & ","abs(log2FoldChange)>",lfcThres)
+
+rel.contrs = 1:nrow(res)
+
+as_tibble(cbind(res,"contrast #"=rel.contrs) %>%  tibble::rownames_to_column(var="contrast"))
+```
+
+
+#  Motifs (Homer)
+
+"The DNA binding specificity of transcription factors are generally highly conserved between related organisms.  DNA binding profiles for human and mouse transcription factors are almost identical, making the information about transcription factor specificity interchangeable between mammalian (or even vertebrate) organisms.  This is also true with respect to TSS/promoter enriched motifs - vertebrates are generally all enriched for the same promoter motifs (SP1, NFY, NRF, ETS, ...).  However, different sets of organisms, such as fruit flys, or yeast, or plants, or others often contain completely different repertoires of transcription factors and promoter motifs.  Because of this, each of these evolutionary distinct sets are presented as a separate transcription factor library." 
+
+http://homer.ucsd.edu/homer/motif/motifDatabase.html
+
+
+```{r homer_pairwise ,eval=T}
+# save peak atlas
+bg = dbs.all[[1]] %>% as.data.frame()
+bg$peak = row.names(bg)
+spl <- strsplit(gsub("-|:", ".", bg$peak), ".", fixed = TRUE)
+bg$chr = sapply(spl, "[", 1)
+bg$start =sapply(spl, "[", 2)
+bg$end = gsub("\\_.*","",sapply(spl, "[", 3))
+bg = data.frame(chr=bg$chr, start=bg$start, end=bg$end)
+write.table(bg, file = "parking_peak_atlas.bed", quote=F, row.names =F, col.names=F, sep="\t")
+
+# https://robertamezquita.github.io/marge/
+library(marge)
+options('homer_path' = '/Users/pz/miniconda3/share/homer-4.10-0/')
+#check_homer()
+
+dir.create("./parking_homer_res/", showWarnings = FALSE, recursive = FALSE, mode = "0777")
+
+lapply(rel.contrs, function(x){
+  name = names(dbs.all)[x]
+  
+  dir.create(paste0("./parking_homer_res/",paste0(name,"_posFC")), showWarnings = FALSE, recursive = FALSE, mode = "0777")
+  results_dir = paste0("./parking_homer_res/",paste0(name,"_posFC"))
+
+  dt <- as.data.frame(dbs.all.sig[[x]])
+  dt$seqnames = gsub(":.*","",row.names(dt))
+  dt$start = gsub(".*:","",row.names(dt)) %>% gsub("\\-.*", "",.) %>% as.numeric()
+  dt$end = gsub(".*:","",row.names(dt)) %>% gsub(".*-", "",.)  %>% as.numeric()
+  dt = data.table(dt)
+  bed <- data.frame(dt[ padj<alphaTR &  log2FoldChange>0,c("seqnames", "start", "end")])
+  bed$name = paste0(bed$seqnames,":",bed$start,"-",bed$end)
+  names(bed) <- c("chr", "start", "end", "name")
+  write.table(bed, file = paste0("./parking_homer_res/",paste0(name,"_posFC"),".bed"), quote=F, row.names =F, col.names=F, sep="\t")
+  
+  find_motifs_genome(
+    bed,
+    path = results_dir,
+    genome = 'mm10r', 
+    scan_size = 'given',
+    optimize_count = 8,
+    background = bg,
+    local_background = FALSE,
+    only_known = TRUE,
+    only_denovo = FALSE,
+    fdr_num = 5,
+    cores = 2, 
+    overwrite = TRUE, 
+    keep_minimal = FALSE
+  )
+  
+  
+  dir.create(paste0("./parking_homer_res/",paste0(name,"_negFC")), showWarnings = FALSE, recursive = FALSE, mode = "0777")
+  results_dir = paste0("./parking_homer_res/",paste0(name,"_negFC"))
+  
+  bed <- data.frame(dt[ padj<alphaTR &  log2FoldChange<0,c("seqnames", "start", "end")])
+  bed$name = paste0(bed$seqnames,":",bed$start,"-",bed$end)
+  names(bed) <- c("chr", "start", "end", "name")
+  write.table(bed, file = paste0("./parking_homer_res/",paste0(name,"_negFC"),".bed"), quote=F, row.names =F, col.names=F, sep="\t")
+  
+  find_motifs_genome(
+    bed,
+    path = results_dir,
+    genome = 'mm10r', 
+    scan_size = 'given',
+    optimize_count = 8,
+    background = bg,
+    local_background = FALSE,
+    only_known = TRUE,
+    only_denovo = FALSE,
+    fdr_num = 5,
+    cores = 2, 
+    overwrite = TRUE, 
+    keep_minimal = FALSE
+  )
+})
+```
+
+
+Following Park et al  -- https://www.science.org/doi/10.1126/science.aat5749 -- 
+
+Motif analysis was done using HOMER against the peak atlas as background.
+Motif analysis was run separately on hyper- or hypo-accessible peaks using HOMER, with the flags -size given and -mask. 
+For each motif, the difference in rank (hyper-hypo) was used to identify motifs enriched in hyper- accessible peaks or in hypo-accessible peaks. 
+
+
+- Read in the data from the current file using the function fread.
+- Subset the data to include only rows with a P-value less than 0.05.
+- Create a list of motif names that are present in either the positive and negative datasets.
+- Subset the data to include only rows with motif names in the list of motif_union motifs.
+- Add a column to the data indicating the rank of each motif based on its P-value.
+- Merge the positive and negative datasets based on the motif name.
+- Calculate the difference in rank between the positive and negative datasets.
+- Select the top 20 motifs with the greatest difference in rank and save them in the variable top_hits.
+
+```{r homer_plots_pairwise, fig.width=5.5, fig.height=6, eval=T , fig.path='fig7_atacseq_homer/', dev=c('png', 'pdf')}
+file_list <- list.files("./parking_homer_res/", pattern="*knownResults.txt$", full.names=TRUE,recursive=T)
+pos_file_list <- file_list[grep("pos", file_list)]
+neg_file_list <- file_list[grep("neg", file_list)]
+table(gsub("neg", "pos", neg_file_list) == pos_file_list)
+
+top_hits_m = lapply( 1:length(pos_file_list), function(x){ 
+  
+  top=20
+  ## only keep with P < 0.05
+  pos_res <- fread(pos_file_list[x])
+  
+  ## only keep with P < 0.05
+  neg_res <- fread(neg_file_list[x])
+  
+  ## keep those  that have P < 0.05 in at least one list
+  pos_res_sig <- subset(pos_res, as.numeric(pos_res$"P-value") < 0.05) 
+  neg_res_sig <- subset(neg_res, as.numeric(neg_res$"P-value") < 0.05) 
+  
+  motif_union <- union(pos_res_sig$"Motif Name", neg_res_sig$"Motif Name")
+  
+  pos_res <-subset(pos_res, pos_res$"Motif Name" %in% motif_union)
+  neg_res <-subset(neg_res, neg_res$"Motif Name" %in% motif_union)
+  
+  ## add rank
+  pos_res$rank <-  seq.int(nrow(pos_res))
+  neg_res$rank <-  seq.int(nrow(neg_res))
+  
+  combined <- merge(pos_res, neg_res, by="Motif Name")
+  combined$diffRank <- combined$rank.x - combined$rank.y
+  
+  combined <- combined[order(combined$diffRank),]
+  
+  top_hits <- psych::headTail(combined, top, top, ellipsis=F)
+  top_hits <- top_hits[,c("Motif.Name","Log.P.value.x", "Log.P.value.y", "rank.x", "rank.y", "diffRank")]
+  top_hits$Motif.Name <- gsub("\\(.*","",top_hits$Motif.Name) 
+  
+  top_hits$Log.P.value.x  <- top_hits$Log.P.value.x * -1
+  top_enriched.x <-  head(top_hits, top)[,c(1,2)]
+  top_enriched.x$color <- c("black")
+  top_enriched.y <-  tail(top_hits, top)[,c(1,3)]
+  top_enriched.y$color <- c("red")
+  
+  colnames(top_enriched.x) <- c("Motif", "Log.P", "color")
+  colnames(top_enriched.y) <- c("Motif", "Log.P", "color")
+  
+  top_hits <- rbind(top_enriched.x, top_enriched.y)
+  
+  top_hits_m <- melt(top_hits)
+  top_hits_m <- top_hits_m[order(top_hits_m$value),]
+  top_hits_m <- top_hits_m[!duplicated(top_hits_m$Motif),]
+  top_hits_m$Motif  <- toupper( top_hits_m$Motif )
+  top_hits_m$Motif <- factor(top_hits_m$Motif, levels=c(top_hits_m$Motif))
+  name <- gsub("./parking_homer_res//", "",  pos_file_list[x]) %>% gsub("_posFC/knownResults.txt", "", .)
+  
+  
+  p <- ggplot(top_hits_m, aes(Motif,value, fill=color, label=Motif)) +  geom_bar(stat="identity",position="identity") + coord_flip() +theme_classic() + scale_fill_manual(values=c( rgb2hex(0,68,27), rgb2hex(128,125,186)), labels=c(paste("Peaks opening", strsplit(name, "_vs_")[[1]][1]), paste("Peaks opening", strsplit(name, "_vs_")[[1]][2]))) + ylab("-log10(P)") + ggtitle(name) + guides(fill=guide_legend(title=NULL, reverse=TRUE)) + scale_y_continuous(breaks = pretty(top_hits_m$value), labels = abs(pretty(top_hits_m$value))) + theme(legend.position="bottom")
+  
+  print(p)    
+  return(top_hits_m)
+}) %>% invisible()
+```
+
+
+
+
+
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=FALSE,echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```
+

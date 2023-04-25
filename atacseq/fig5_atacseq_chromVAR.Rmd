@@ -1,0 +1,189 @@
+---
+title: Fig5
+subtitle:  "Heatmap of chromVAR computed deviations z-score for the top 30 most variable transcription factor (TF) motifs across TCRTAG tumor and infection at 6, 12, and 24h."
+author: "pz"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    highlight: tango
+    df_print: paged
+    toc: yes
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE, result='hold',fig.width=10,tidy=TRUE, cache=FALSE)
+knitr::opts_knit$set(progress=TRUE,verbose=TRUE)
+```
+
+```{r libraries, cache=FALSE}
+library(data.table)
+library(magrittr)
+library(knitr)
+library(ggplot2); theme_set(theme_bw(base_size = 16))
+library(DESeq2)
+library(tidyverse)
+library(chromVAR)
+library(chromVARmotifs)
+library(motifmatchr)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(pheatmap)
+library(viridis)
+```
+
+
+
+```{r decoder}
+decoderFile <- "atac_decoder.csv"
+decoder.data <- read.table(decoderFile,header=T,stringsAsFactors=F, sep=",")
+decoder.data$SampleID = make.names(decoder.data$SampleID)
+decoder.data$Condition = factor(decoder.data$Condition)
+# select early timepoints only
+decoder.data = subset(decoder.data, (Condition %in% c("E6hr", "E12hr", "E24hr", "L6hr", "L12hr", "L1d")))
+```
+
+# Samples
+
+The following samples were part of this analysis:
+
+```{r samples}
+as_tibble(decoder.data)
+```
+
+```{r loadDESeq2Object_extractRawCounts}
+# see runDiffBind.R, runSVA.R
+load("sva_dds_vsd.RData")
+
+# load counts
+df = assay(dds)[,decoder.data$SampleID] %>% as.data.frame()
+
+spl <- strsplit(gsub("-|:", ".", row.names(df)), ".", fixed = TRUE)
+df$seqnames = sapply(spl, "[", 1)
+df$start =sapply(spl, "[", 2)
+df$end = gsub("\\_.*","",sapply(spl, "[", 3))
+  
+gr = GRanges(df)
+
+if (!all(gr$peak == row.names(df))) {
+  stop("Row names do not match GRanges object")
+}
+
+if (!all(colnames(mcols(gr)) == decoder.data$SampleID)) {
+  stop("Column names do not match decoder data SampleID")
+}
+
+se = SummarizedExperiment(assays = list(counts = Matrix::Matrix(as.matrix(mcols(gr)))), 
+                          colData=decoder.data, 
+                          rowRanges=gr)
+```
+
+```{r readInRNAseqCounts}
+# we want to filter out motif atlas for TFs that are expressed 
+RNA.counts <- read.table(file = "../rnaseq/gene.counts.txt", header = TRUE, check.names=FALSE, row.names=1)
+RNA.decoder.data <- fread("../rnaseq/decoder.txt") %>% as.data.frame()
+RNA.decoder.data = subset(RNA.decoder.data, group != "N") # drop naive 
+RNA.counts <- RNA.counts[,RNA.decoder.data$sample.ID]
+# compute cpm 
+cpms = edgeR::cpm(RNA.counts)
+# remove genes that don't have at least 5 CPM on average in each rowMean
+cpms_filt = cpms[rowMeans(cpms) > 5,]
+```
+
+```{r}
+motifs_expr <- mouse_pwms_v2
+motif_names = ArchR:::.summarizeChromVARMotifs(motifs_expr)$motifSummary %>% as.data.frame()
+# only retain motifs that are expressed in the RNA-seq data
+motif_names = motif_names[motif_names$name %in% row.names(cpms_filt),]
+motifs_expr = motifs_expr[which(names(motifs_expr) %in% motif_names$ID)]
+motifs <- motifs_expr
+```
+
+# chromVAR
+
+```{r}
+# Filter rows with total counts > 5
+counts <- se[rowSums(assay(se)) > 5, ]
+
+# Compute deviations and variability
+set.seed(081385)
+counts <- chromVAR::addGCBias(counts, genome = BSgenome.Mmusculus.UCSC.mm10)
+set.seed(081385)
+motif_ix <- motifmatchr::matchMotifs(motifs, rowRanges(counts), genome = BSgenome.Mmusculus.UCSC.mm10)
+set.seed(081385)
+dev <- chromVAR::computeDeviations(object = counts, annotations = motif_ix)
+set.seed(081385)
+variability <- chromVAR::computeVariability(dev)
+
+res_df <- cbind(variability, rank = rank(-1 * variability$variability, ties.method = "random"))
+res_df <- res_df[order(res_df$rank, decreasing = F), ]
+res_df$rank <- NULL
+res_df = res_df[res_df$p_value_adj < 0.05,]
+
+# Filter top significant motifs
+res_df <- cbind(variability, rank = rank(-1 * variability$variability, ties.method = "random"))
+res_df <- res_df[order(res_df$rank, decreasing = F), ]
+res_df <- res_df[res_df$p_value_adj < 0.05,]
+n <- 30
+topVariable <- res_df[1:n, ]
+
+# Replace "LINE" in the name with a suffix of the original row name
+if (any(grepl("LINE", topVariable$name))) {
+  topVariable[grep("LINE", topVariable$name), "name"] <- paste0("LINE-", sapply(strsplit(gsub("_", "-", row.names(topVariable[grep("LINE", topVariable$name), ])), "-"), `[`, 4))
+}
+
+# Merge top variable motifs with deviation scores
+devTop <- merge(topVariable[, 1, drop = FALSE], assay(dev, "z"), by = 0)
+devToPlot <- as.matrix(devTop[, -c(1:2)])
+rownames(devToPlot) <- devTop[, 2]
+```
+
+## Top 30 most variable motifs
+
+```{r chromVar_top30,  fig.width=8}
+as_tibble(res_df)
+
+col_order = c("E6-3","E6-2","E6-1","E12-3","E12-2","E12-1","E24-3","E24-2","E24-1","L6-3","L6-2","L6-1","L12-3", "L12-2", "L12-1", "L1d-3","L1d-2","L1d-1")
+
+devToPlot_ordered = devToPlot[,make.names(col_order)]
+
+annot_col = data.frame( colData(dev))[,"Condition", drop=F]
+
+annotation_colors = list(Condition=c("E6hr"="#ccece6",
+                                     "E12hr"="#99d8c9",
+                                     "E24hr" =  "#66c2a4",
+                                     "L6hr" = "#c6dbef",
+                                     "L12hr" = "#6baed6",
+                                     "L1d" = "#439dcb"))
+pheatmap(devToPlot_ordered,
+         scale = "none",
+         annotation_col = annot_col,
+         annotation_colors = annotation_colors,
+         cluster_cols = FALSE,
+         cluster_rows = TRUE,
+         show_rownames = TRUE,
+         clustering_method = "ward.D2",
+         color = viridis(50),
+         fontsize_row = 12,
+         gaps_col = 9,
+         silent = FALSE,
+         cellwidth = 15,
+         cellheight = 10,
+         treeheight_col = 45,
+         main = "",
+         border_color = NA,
+         treeheight_row = 0)
+```
+
+
+
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=FALSE,echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```

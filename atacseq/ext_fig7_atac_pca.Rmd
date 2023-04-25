@@ -1,0 +1,101 @@
+---
+title: Ext fig 7
+subtitle:  "Principal component analysis (PCA) of ATAC-SEQ data."
+author: "pz"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    highlight: tango
+    df_print: paged
+    toc: yes
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE, result='hold',fig.width=10,tidy=TRUE, cache=FALSE)
+knitr::opts_knit$set(progress=TRUE,verbose=TRUE)
+```
+
+```{r libraries, cache=FALSE}
+library(data.table)
+library(magrittr)
+library(knitr)
+library(ggplot2); theme_set(theme_bw(base_size = 16))
+library(DESeq2)
+library(dplyr)
+rgb2hex <- function(r,g,b) sprintf('#%s',paste(as.hexmode(c(r,g,b)),collapse = ''))
+```
+
+
+
+```{r decoder}
+decoderFile <- "atac_decoder.csv"
+decoder.data <- read.table(decoderFile,header=T,stringsAsFactors=F, sep=",")
+decoder.data$SampleID = make.names(decoder.data$SampleID)
+decoder.data$Condition = factor(decoder.data$Condition)
+decoder.data$Condition <- relevel(decoder.data$Condition, ref = "N")
+decoder.data = subset(decoder.data, !(Condition %in% c("P10d", "P1d", "P5d")))
+```
+
+
+```{r loadDESeq2Object}
+# see runDiffBind.R, runSVA.R
+load("sva_dds_vsd.RData")
+vsd = vsd[,decoder.data$SampleID]
+```
+
+# Samples
+
+The following samples were part of this analysis:
+
+```{r samples}
+as_tibble(decoder.data)
+```
+
+# PCA {.tabset}
+
+## Infection
+
+```{r}
+decoder.data.sub = subset(decoder.data, type %in% c("effector", "naive", "memory"))
+ntop = Inf
+Pvars <- rowVars(assay(vsd)[,make.names(decoder.data.sub$SampleID)])
+select <- order(Pvars, decreasing = TRUE)[seq_len(min(ntop, length(Pvars)))]
+PCA <- prcomp(t(assay(vsd)[select, make.names(decoder.data.sub$SampleID)]), scale = F)
+percentVar <- round(100*PCA$sdev^2/sum(PCA$sdev^2),1)
+dataGG = data.frame(PC1 = PCA$x[,1], PC2 = PCA$x[,2], sampleName = row.names(colData(vsd)[make.names(decoder.data.sub$SampleID),]),colData(vsd)[make.names(decoder.data.sub$SampleID),])
+dataGG = merge(data.frame(PC1 = PCA$x[,1], PC2 = PCA$x[,2]), as.data.frame(colData(vsd)), by="row.names")
+dataGG$Condition = factor(dataGG$Condition, levels=c("N", "E6hr", "E12hr", "E24hr", "E5d", "E7d", "M"))
+
+p = ggplot(dataGG, aes(PC1, PC2)) + geom_point(size = 5, aes(fill = Condition, shape=batch), show.legend = T) + theme_bw(base_size =18)   + scale_shape_manual(values=c(24, 21, 21), name="") +
+  xlab( paste0("PC1: ", round(percentVar[1], digits=2), "% variance")) + 
+  ylab( paste0("PC2: ", round(percentVar[2], digits=2), "% variance")) +
+  scale_fill_manual(values=c("N" = rgb2hex(99,99,99),
+                             "E6hr" = rgb2hex(204,236,230),
+                             "E12hr" = rgb2hex(153,216,201),
+                             "E24hr" = rgb2hex(102,194,164),
+                             "E5d" = rgb2hex(35,139,69),
+                             "E7d" = rgb2hex(35,139,69),
+                             "M" = rgb2hex(0,68,27)), name="") + 
+  theme(plot.background = element_blank(), panel.grid.minor = element_blank(), panel.grid.major = element_blank()) +
+  theme(legend.position ="right") + theme(legend.spacing.y = unit(0, "lines"),legend.margin = margin(0, 0, 0, 0)) + 
+  guides(fill = guide_legend(override.aes = list(shape=21)))
+p + scale_y_reverse() + scale_x_reverse()
+```
+
+```{r, fig.width=6, fig.height=5, eval=F}
+p + theme(legend.position = "none")
+p + scale_y_reverse() + scale_x_reverse() + theme(legend.position = "none")
+```
+
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=FALSE,echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```

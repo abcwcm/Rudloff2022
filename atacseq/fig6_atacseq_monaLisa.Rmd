@@ -1,0 +1,171 @@
+---
+title: monalisa
+subtitle: 
+author: "pz"
+date: 'April 16, 2023'
+output:
+  html_document:
+    highlight: tango
+    df_print: paged
+    toc: yes
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    code_folding: hide
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE, result='hold',fig.width=10,tidy=TRUE, cache=FALSE)
+knitr::opts_knit$set(progress=TRUE,verbose=TRUE)
+```
+
+```{r libraries, cache=FALSE}
+knitr::opts_chunk$set(bootstrap.show.code = FALSE, message=FALSE, warning=FALSE)
+library(data.table)
+library(magrittr)
+library(knitr)
+library(ggplot2); theme_set(theme_bw(base_size = 16))
+library(DESeq2)
+library(dplyr)
+library(openxlsx)
+library(monaLisa)
+library(openxlsx)
+library(GenomicRanges)
+library(Biostrings)
+library(BSgenome.Mmusculus.UCSC.mm10)
+```
+
+
+Using peaks from categories int, reinforced, stable, and transient as "bins" from:
+  - scatter_unfiltered_E6hr_vs_N_vs_E5d_vs_E24hr.xlsx
+  - scatter_unfiltered_L6hr_vs_N_vs_L5d_vs_L1d.xlsx
+  
+  
+Ran monaLisa against JASPAR 2022 peak sets via calcBinnedMotifEnrR.
+"In each enrichment analysis, the sequences in a specific bin are used as foreground sequences to test for motif enrichments comparing to background sequences (defined by background, see below). The logic follows the findMotifsGenome.pl tool from Homer version 4.11, with -size given -nomotif -mknown and additionally -h if using test = "fisher", and gives very similar results. As in the Homer tool, sequences are weighted to correct for GC and k-mer composition differences between fore- and background sets."
+
+Used default background "otherBins": The background sequences are defined according to the value of the background argument:
+
+  -otherBins: sequences from all other bins (excluding the current bin)
+
+
+We plot the monaLisa output log2enr (motif enrichments as log2 ratios) as a heatmap if the motif was statisiclaly significant in at least on bin  (padj < 1e-10)
+
+https://github.com/fmicompbio/monaLisa
+
+```{r onCluster, eval=F}
+# done here /SSD/paz2005/monalisa 
+library(monaLisa)
+library(openxlsx)
+library(GenomicRanges)
+library(Biostrings)
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(TFBSTools)
+library(JASPAR2022)
+
+create_granges <- function(data, prefix, cat) {
+  granges <- GRanges(subset(data, group2 == cat))
+  names(granges) <- paste0(prefix, ".", names(granges))
+  return(granges)
+}
+
+# Read data and create GRanges objects
+eff <- read.xlsx("scatter_unfiltered_E6hr_vs_N_vs_E5d_vs_E24hr.xlsx")
+eff.int.gt <- create_granges(eff, "e.int", "int")
+eff.reinforced.gt <- create_granges(eff, "e.reinforced", "reinforced")
+eff.stable.gt <- create_granges(eff, "e.stable", "stable")
+eff.transient.gt <- create_granges(eff, "e.transient", "transient")
+
+les <- read.xlsx("scatter_unfiltered_L6hr_vs_N_vs_L5d_vs_L1d.xlsx")
+les.int.gt <- create_granges(les, "l.int", "int")
+les.reinforced.gt <- create_granges(les, "l.reinforced", "reinforced")
+les.stable.gt <- create_granges(les, "l.stable", "stable")
+les.transient.gt <- create_granges(les, "l.transient", "transient")
+
+all.gr <- c(eff.int.gt,
+            eff.reinforced.gt,
+            eff.stable.gt,
+            eff.transient.gt,
+            les.int.gt,
+            les.reinforced.gt,
+            les.stable.gt,
+            les.transient.gt)
+
+# extract sequences from the genome
+all.gr.seqs <- getSeq(BSgenome.Mmusculus.UCSC.mm10, all.gr)
+
+# define binning vector
+bins2 <- rep(c("eff.int", 
+               "eff.reinforced",
+               "eff.stable",
+               "eff.transient",
+               "les.int",
+               "les.reinforced",
+               "les.stable",
+               "les.transient"), 
+             c(length(eff.int.gt), 
+               length(eff.reinforced.gt),
+               length(eff.stable.gt),
+               length(eff.transient.gt),
+               length(les.int.gt),
+               length(les.reinforced.gt),
+               length(les.stable.gt),
+               length(les.transient.gt)))
+bins2 <- factor(bins2)
+table(bins2)
+
+
+pwms <- getMatrixSet(JASPAR2022, list(matrixtype = "PWM", tax_group = "vertebrates"))
+
+se2 <- calcBinnedMotifEnrR(seqs = all.gr.seqs, bins = bins2,pwmL = pwms, verbose=TRUE, BPPARAM = BiocParallel::MulticoreParam(12))
+saveRDS(se2, "fig6_atacseq_monaLisa.RDS")
+```
+
+
+# Pheamap of enriched motifs  (row scaling + hclust)
+
+```{r  fig.height=12}
+se2 = readRDS("fig6_atacseq_monaLisa.RDS")
+sel2 <- apply(assay(se2, "negLog10Padj"), 1, function(x) max(abs(x), 0, na.rm = TRUE)) > -log10(0.0000000001)
+sub = se2[sel2]
+sub = sub[,c("eff.transient", "eff.stable","eff.reinforced", "eff.int", "les.transient", "les.stable","les.reinforced", "les.int")]
+
+annot_col = data.frame( "Condition" =colnames(sub), 
+                        row.names=colnames(sub))
+
+annotation_colors = list(Condition=c("eff.transient" = "#B2ABD2", 
+                                     "eff.stable" = "#5E3C99",
+                                     "eff.reinforced" = "#FDB863", 
+                                     "eff.int" = "#E66101", 
+                                     "les.transient" = "#B2ABD2", 
+                                     "les.stable" = "#5E3C99",
+                                     "les.reinforced"  = "#FDB863", 
+                                     "les.int"= "#E66101"))
+
+pheatmap::pheatmap(
+  assay(sub, "log2enr"),
+  scale = "row",
+  cluster_cols = FALSE,
+  labels_row = rowData(sub)$motif.name,
+  fontsize_row = 10,
+  color = colorRampPalette(c("#053061", "#2166AC", "#4393C3", "#92C5DE", "#D1E5F0", "#F7F7F7", "#FDDBC7", "#F4A582", "#D6604D", "#B2182B", "#67001F"))(50),
+  cellheight = 8,
+  cellwidth = 15,
+  cluster_rows = TRUE,
+  annotation_col = annot_col,
+  annotation_colors = annotation_colors,
+  gaps_col = c(4),
+  border_color = NA,
+  treeheight_row = 0
+)
+```
+
+
+
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=FALSE,echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```
